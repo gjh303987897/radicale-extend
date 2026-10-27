@@ -1,6 +1,25 @@
 # radicale-extend
 
-Go 编写的 Radicale 扩展服务器：MCP 日程与待办管理、重复日程提醒、SMTP 邮件和 Telegram 通知。没有前端页面，也不修改 Radicale 上游代码。兼容基线为 **Radicale 3.9.0**。
+Go 编写的 [Radicale](https://radicale.org/v3.html) 扩展服务器，通过 MCP（Model Context Protocol）管理日程和待办，并使用 SMTP 邮件或 Telegram 发送变更通知和到期提醒。
+
+这是一个**无前端页面的单用户服务器应用**。Radicale 继续负责 CalDAV 数据和权限，Go 服务负责 MCP、调度和消息投递，Python 仅用于最小 Hook 插件。兼容基线固定为 **Radicale 3.9.0**，无须修改其上游代码。
+
+典型流程：让 AI 创建日程，在手机日历中同步和修改，到指定时间收到个人邮件或 Telegram 提醒。
+
+## 目录
+
+- [能力与边界](#能力与边界)
+- [Docker Compose 部署](#docker-compose-部署)
+- [配置参考](#配置参考)
+- [命令行参考](#命令行参考)
+- [开发与测试](#开发与测试无本地-docker)
+- [GitHub Actions 与 GHCR](#github-actions-与-ghcr)
+- [常见问题](#常见问题)
+- [可靠性说明](#可靠性说明)
+- [项目结构](#项目结构)
+- [验证范围](#验证范围)
+
+## 工作方式
 
 ```text
 MCP 客户端 -> Go 服务 -> CalDAV -> Radicale <- 手机/桌面日历
@@ -10,6 +29,8 @@ MCP 客户端 -> Go 服务 -> CalDAV -> Radicale <- 手机/桌面日历
                           Go Worker -> 提醒/投递任务 -> SMTP、Telegram
                           周期 DAV 同步校验 ------^
 ```
+
+Hook 将原始变更快速写入本地队列，Go Worker 再通过 CalDAV 读取当前状态、生成提醒和发送消息。邮件与 Telegram 网络请求不会在 Radicale 的同步请求中执行。客户端通过正常 CalDAV 接口使用 Radicale，MCP 客户端连接 Go 服务。
 
 ## 能力与边界
 
@@ -27,6 +48,10 @@ MCP 客户端 -> Go 服务 -> CalDAV -> Radicale <- 手机/桌面日历
 
 以下 Docker 命令用于部署服务器或 GitHub Runner。**项目的本地开发测试不运行 Docker。**
 
+部署服务器需要 Docker Engine、支持 `docker compose` 命令的 Compose 插件，以及用于初始化凭据的 Python 3.11+。使用发布镜像时，服务器无需安装 Go。
+
+先确认两个 GHCR 镜像已经发布。下文的 `your-owner`、`your-repo` 和 `0.1.0` 都是示例，需要替换成实际仓库和已发布标签；本 README 不表示示例地址已有可用镜像。发布步骤见 [GitHub Actions 与 GHCR](#github-actions-与-ghcr)。
+
 ### 1. 准备配置和凭据
 
 在目标服务器下载本项目部署文件。使用 Python 创建独立环境并生成凭据：
@@ -40,6 +65,8 @@ cp config.example.yaml config.yaml
 ```
 
 Windows 可使用 `.venv\Scripts\python.exe` 和对应的文件复制命令。
+
+项目内的 `.env`、`config.yaml`、`secrets/`、数据库及测试缓存已加入 `.gitignore`；示例配置可以提交，真实配置和凭据不应提交。
 
 生成器创建随机 DAV 密码、MCP Token、bcrypt 用户文件及空的渠道密钥文件，已有文件时拒绝覆盖。`secrets/` 目录为 0700，单个文件为 0644，使容器 UID 10001 能读取文件挂载；宿主机通过父目录限制访问。不要将目录整体改成公开可读。Windows 下另用 NTFS ACL 限制目录访问。
 
@@ -58,7 +85,35 @@ DAV_USERNAME=alice
 
 ### 2. 配置消息渠道
 
-在 `config.yaml` 中按需启用：
+可以只启用一个渠道，也可以同时启用。编辑 `config.yaml` 的对应配置块，保持其他配置不变。
+
+SMTP 示例：
+
+```yaml
+smtp:
+  enabled: true
+  host: smtp.example.com
+  port: 587
+  security: starttls
+  username: calendar@example.com
+  password:
+    file: /run/secrets/smtp_password
+  from: calendar@example.com
+  to: me@example.com
+```
+
+Telegram 示例：
+
+```yaml
+telegram:
+  enabled: true
+  token:
+    file: /run/secrets/telegram_token
+  chat_id: '123456789'
+  api_url: https://api.telegram.org
+```
+
+设置时注意：
 
 - 邮件：设置 `smtp.enabled: true`、host、port、security、username、from、to；密码写到 `secrets/smtp_password`。默认 STARTTLS，TLS 证书必须有效；使用 `security: tls` 对接隐式 TLS。`none` 只适合可信的无认证内网中继。
 - Telegram：向 BotFather 创建 Bot，把 Token 写入 `secrets/telegram_token`；先向 Bot 发送 `/start`，通过 Bot API 的 `getUpdates` 确认自己的 `chat.id`，再配置 `telegram.chat_id` 和 `enabled: true`。不要把 Token 或更新内容粘贴到公共日志。
@@ -180,9 +235,81 @@ Go 使用 `init-db --config ...` 初始化数据库，之后再启动 Radicale�
 
 注意：上游加载 Hook 失败时会降级到 `none`；配套镜像在启动前额外检查插件和协议，外部部署也应检查启动日志。
 
+## 配置参考
+
+部署示例见 [config.example.yaml](config.example.yaml)，原生运行示例见 [config.local.example.yaml](config.local.example.yaml)，Compose 变量见 [.env.example](.env.example)。
+
+### 服务配置
+
+下面列出未显式配置时的程序默认值。Compose 示例另将监听地址设为 `0.0.0.0:8080`，并将数据文件放入 `/data` 下的持久化卷。
+
+| 配置项 | 程序默认值 | 作用 |
+| --- | --- | --- |
+| `listen` | `127.0.0.1:8080` | HTTP MCP 和健康检查的监听地址 |
+| `dav.url` / `dav.username` | 必填 | DAV 服务地址及单用户账号 |
+| `dav.home` | DAV 基础路径下的用户目录 | 可选的日历主页路径 |
+| `storage.state` | `data/state.db` | 快照、规则、提醒和投递状态库 |
+| `storage.queue` | `data/queue.db` | Python Hook 与 Go 共用的事件队列库 |
+| `timezone` | `Asia/Shanghai` | 浮动时间的解释、消息显示及免打扰时区 |
+| `sync_interval` | `5m` | 周期同步间隔，至少 1 秒 |
+| `debounce` | `30s` | 连续变更通知的合并等待时间 |
+| `reminder.default_before` | `15m` | 没有 VALARM 或服务端覆盖时的提前量 |
+| `reminder.all_day_at` | `'09:00'` | 没有显式提醒的全天事件通知时刻 |
+| `reminder.horizon_days` | `30` | 提醒生成窗口，允许 1～366 天 |
+| `reminder.max_instances` | `10000` | 实例展开数量限制，允许 1～100000 |
+| `reminder.grace` | `10m` | 提醒迟到补发的宽限期 |
+| `smtp.enabled` / `telegram.enabled` | `false` | 渠道必须显式开启 |
+
+时间间隔使用 Go duration 格式，例如 `30s`、`5m`、`24h`，不能写成 `1d`。两个数据库路径必须不同。配置含未知字段时会报错，修改配置后需要重启服务。
+
+### 环境变量和密钥
+
+| 环境变量 | 对应配置 |
+| --- | --- |
+| `MCP_TOKEN` / `MCP_TOKEN_FILE` | `token.value` / `token.file` |
+| `DAV_PASSWORD` / `DAV_PASSWORD_FILE` | `dav.password.value` / `dav.password.file` |
+| `SMTP_PASSWORD` / `SMTP_PASSWORD_FILE` | `smtp.password.value` / `smtp.password.file` |
+| `TELEGRAM_TOKEN` / `TELEGRAM_TOKEN_FILE` | `telegram.token.value` / `telegram.token.file` |
+| `DAV_URL` | `dav.url` |
+| `DAV_USERNAME` | `dav.username` |
+| `DAV_HOME` | `dav.home` |
+| `TELEGRAM_CHAT_ID` | `telegram.chat_id` |
+| `LISTEN` | `listen` |
+| `RADICALE_EXTEND_QUEUE` | 仅供 Python Hook 使用，指定共用队列库文件 |
+
+密钥优先级为：非空的 `*_FILE` 环境变量 > 已设置的直接值环境变量 > YAML 中的 `file` > YAML 中的 `value`。密钥文件只移除尾部换行，不移除空格。YAML 配置中的密钥文件即使所属渠道关闭也会读取，因此使用 Compose 示例时需要保留初始化脚本创建的空文件。
+
+`.env` 用于 Compose 的变量替换，Go 程序**不会自动读取 `.env`**。若希望向容器传递表中的额外环境变量，需要在 Compose 的 `environment` 中显式配置；现有 Compose 只显式转发 `DAV_USERNAME`，其他凭据通过文件挂载提供。
+
+### Compose 服务与数据
+
+| 服务 | 职责 | 持久化卷 |
+| --- | --- | --- |
+| `init` | 初始化和检查数据库，成功退出属于正常状态 | `state`、`queue` |
+| `radicale` | DAV 服务和 Python Hook | `radicale`、`queue` |
+| `app` | Go MCP、同步、调度和消息投递 | `state`、`queue` |
+
+`APP_CONFIG` 和 `SECRETS_DIR` 是部署服务器上的路径；`config.yaml` 中的 `/run/secrets/...`、`/data/...` 是容器内路径。不要将两者混用。通过 `MCP_BIND`/`MCP_PORT` 和 `DAV_BIND`/`DAV_PORT` 调整宿主机的绑定地址和端口。
+
+## 命令行参考
+
+命令格式为 `radicale-extend <命令> [参数]`，`--config` 应放在子命令后。省略子命令时默认运行 `serve`，配置文件默认为当前目录的 `config.yaml`。
+
+| 命令 | 行为 |
+| --- | --- |
+| `serve --config config.yaml` | 启动 HTTP MCP、Worker、提醒调度和周期同步 |
+| `mcp-stdio --config config.yaml` | 仅启动 stdio MCP，不启动后台任务 |
+| `check-config --config config.yaml` | 读取配置和密钥并校验格式；不测试 DAV 或渠道的连通性 |
+| `init-db --config config.yaml` | 创建或检查两个数据库及协议版本，不连接 DAV |
+| `healthcheck --url http://127.0.0.1:8080/readyz` | 检查就绪状态；失败以非零状态退出，无须读取配置文件 |
+
 ## 开发与测试（无本地 Docker）
 
 需要 Go 1.27 和 Python 3.11+；CI 使用 Python 3.13。复制 `config.local.example.yaml` 到 `config.yaml`，通过 `DAV_PASSWORD`、`MCP_TOKEN` 配置凭据。HTTP Token 至少 32 字节。也支持相应的 `*_FILE`，文件设置优先于直接环境变量，环境设置优先于 YAML。
+
+原生运行前，需要有可访问的 Radicale。使用 Hook 时先执行 `init-db`，再在 Radicale 进程中配置 `RADICALE_EXTEND_QUEUE` 和插件；连接现有实例时按前文完成适配。仅运行单元测试不需要预先运行 Radicale，原生集成测试会自行启动临时进程。
+
+Linux/macOS：
 
 ```sh
 go build -o bin/radicale-extend ./cmd/radicale-extend
@@ -206,6 +333,23 @@ go vet ./...
 
 CLI 另提供 `healthcheck --url http://127.0.0.1:8080/readyz`。数据库初始化和配置检查不会启动 HTTP 或 Worker。
 
+Windows PowerShell 测试示例：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install ./hook bcrypt==4.3.0 PyYAML==6.0.3
+New-Item -ItemType Directory -Force .cache/tmp | Out-Null
+$env:TEMP = (Resolve-Path .cache/tmp).Path
+$env:TMP = $env:TEMP
+$env:RADICALE_PYTHON = (Resolve-Path .venv/Scripts/python.exe).Path
+go test ./... -count=1
+go vet ./...
+.\.venv\Scripts\python.exe -m unittest discover -s hook/tests -v
+.\.venv\Scripts\python.exe scripts/check_assets.py
+```
+
+在支持 CGO 且安装了 C 编译器的环境中，可再运行 `go test -race ./... -count=1`。Linux CI 会执行该检查。本地不运行 `tests/compose_smoke.py` 或 `docker compose config`；容器验证交给 GitHub Runner。
+
 ## GitHub Actions 与 GHCR
 
 - CI：Go 格式/vet/竞态检查、Python Hook、原生 Radicale 集成、部署静态检查；GitHub Runner 额外构建两个镜像并运行 Compose 冒烟测试，用合成 SMTP/Telegram 服务验证投递和重启去重，不发送真实通知。
@@ -213,7 +357,33 @@ CLI 另提供 `healthcheck --url http://127.0.0.1:8080/readyz`。数据库初始
 - 发布前复用完整 CI；通过后用 GITHUB_TOKEN 推送两套 linux/amd64、linux/arm64 镜像，同时生成 `sha-<完整提交SHA>` 标签、OCI 来源、SBOM 和构建来源证明。`latest` 和 `sha-*` 为保留输入标签。
 - 勾选 update_latest 只允许从默认分支执行。所有 Action 引用固定到经过查询的提交 SHA。
 - 工作流申请 contents:read、packages:write。组织策略需允许工作流发布包；已有同名包需给仓库 Actions 写权限。首次发布后在包设置中自行选择可见性；本工作流不更改可见性，不需要额外 PAT。
-- 工作流汇总输出镜像摘要，部署可进一步固定到摘要。此目录没有绑定远程仓库，源码交付本身不会触发 GitHub 构建或上传镜像。
+- 工作流汇总输出镜像摘要，部署可进一步固定到摘要。工作流需要将代码推送到 GitHub 后在对应仓库中运行，示例地址不代表镜像已经发布。
+
+对于仓库 `YourOwner/radicale-extend`，发布 tag `0.1.0` 后的镜像名称为：
+
+```text
+ghcr.io/yourowner/radicale-extend:0.1.0
+ghcr.io/yourowner/radicale-extend-radicale:0.1.0
+```
+
+仓库名称与上述示例不同时，两个镜像名称也会随之变化。普通 push、PR 和推送 Git 标签不会触发镜像发布；需要手动执行发布工作流。发布失败应先查看 `validate`、`checks` 或 `publish` 对应任务，再决定是否重试。
+
+## 常见问题
+
+| 现象 | 检查项 |
+| --- | --- |
+| `/mcp` 返回 401 | 请求头是否为 `Authorization: Bearer ...`，是否误用了 DAV 密码，Token 是否与服务配置一致 |
+| DAV 返回 401/403 | 用户名、密码、bcrypt 用户文件及 Radicale 权限；修改生成的 DAV 密码时，用户文件中的哈希也必须同步更新 |
+| 更新或删除返回 412 | 重新读取资源获取最新 ETag，再由调用者处理并发冲突，不使用 `*` 覆盖 |
+| 服务未就绪，`/readyz` 返回 503 | 检查 `init` 是否成功、Radicale 是否健康，以及 DAV URL、账号和存储目录权限 |
+| Hook 报队列不存在或协议错误 | 先运行 `init-db`，确认两端访问同一队列目录及 WAL 文件，且运行用户具有读写权限 |
+| 没有收到通知 | 检查渠道是否开启、接收者/密钥、日历白名单、`channels`、免打扰时段及 VALARM/服务端覆盖优先级 |
+| 只运行 stdio 时没有提醒 | 后台任务需要单独运行的 `serve`，两者必须使用一致的配置和数据库 |
+| `list_reminders` 中有 `scheduling_error` | 检查时区、重复规则和实例数量；无法解释的语义不会生成猜测性提醒 |
+| 提醒过期未发送 | 检查服务停机时长及 `reminder.grace`；超过宽限期的提醒不补发 |
+| 镜像拉取失败 | 确认镜像已经发布、名称小写且 tag 存在；私有包还需要 GHCR 登录和读取权限 |
+
+`/readyz` 会提供 `pending_jobs`、`failed_jobs`、`queued_events`、`failed_events` 和 `unsupported_resources` 计数。实际发送结果以任务状态及日志为准，配置检查成功并不表示 SMTP、Telegram 或 DAV 已经连通。
 
 ## 可靠性说明
 
@@ -222,6 +392,30 @@ CLI 另提供 `healthcheck --url http://127.0.0.1:8080/readyz`。数据库初始
 提醒默认预生成未来 30 天内的触发时间，展开数量受限；改期、删除、取消、完成后撤销旧提醒。发送前重新读取 DAV，DAV 不可用则延后重试。重启补发默认最多迟到 10 分钟，超过宽限期不再发送。
 
 手机写入和队列入队并非同一事务。进程崩溃可能漏掉历史中间变化；补偿可以恢复当前提醒状态，无法恢复全部历史通知。远端收件成功但本地尚未记录成功时崩溃也可能导致重复发送，属于至少一次投递的边界。不要将提醒用于依赖恰好一次投递的流程。
+
+## 项目结构
+
+```text
+cmd/radicale-extend/   Go 命令行入口
+internal/
+  calendar/           iCalendar、重复实例和提醒解析
+  config/             YAML、环境变量及密钥读取
+  dav/                DAV 访问、地址限制和条件写入
+  mcpapi/             MCP 工具和 HTTP 接口
+  notify/             SMTP、Telegram 投递
+  service/            同步、队列消费和调度
+  store/              SQLite 数据库与任务状态
+hook/                 独立 Python Hook 包和测试
+integration/          原生 Radicale 集成测试
+deploy/               Radicale 配置、启动和健康检查
+scripts/              凭据初始化及静态检查
+tests/                GitHub Runner 的 Compose 冒烟测试
+.github/workflows/    CI 和手动 GHCR 发布
+compose.yaml          配套部署入口
+Dockerfile            app、radicale 两个镜像目标
+```
+
+开发约定见 [AGENTS.md](AGENTS.md)。Go 是核心业务语言，Python 限于适配、部署辅助和测试，不引入前端工程。
 
 ## 验证范围
 
