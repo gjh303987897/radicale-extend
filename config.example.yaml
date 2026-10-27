@@ -1,0 +1,47 @@
+listen: 0.0.0.0:8080
+timezone: Asia/Shanghai
+token:
+  file: /run/secrets/mcp_token
+dav:
+  url: http://radicale:5232/
+  username: alice
+  password:
+    file: /run/secrets/dav_password
+storage:
+  state: /data/state/state.db
+  queue: /data/queue/queue.db
+sync_interval: 5m
+debounce: 30s
+reminder:
+  default_before: 15m
+  all_day_at: '09:00'
+  horizon_days: 30
+  max_instances: 10000
+  grace: 10m
+quiet:
+  start: ''
+  end: ''
+# Empty list discovers all calendars in this user's home.
+calendars: []
+# calendars:
+#   - path: /alice/work/
+#     channels: [smtp, telegram]
+#     changes: true
+#     reminders: true
+#     hide_details: false
+smtp:
+  enabled: false
+  host: smtp.example.com
+  port: 587
+  security: starttls
+  username: ''
+  password:
+    file: /run/secrets/smtp_password
+  from: calendar@example.com
+  to: me@example.com
+telegram:
+  enabled: false
+  token:
+    file: /run/secrets/telegram_token
+  chat_id: ''
+  api_url: https://api.telegram.org

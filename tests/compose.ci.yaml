@@ -1,0 +1,18 @@
+# Used exclusively by GitHub-hosted CI, never by local tests.
+services:
+  mock-channels:
+    image: python:3.13-slim-bookworm
+    command: [python, /test/mock_channels.py]
+    volumes:
+      - ./tests:/test:ro
+    ports:
+      - '127.0.0.1:18081:8081'
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz')"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+  app:
+    depends_on:
+      mock-channels:
+        condition: service_healthy

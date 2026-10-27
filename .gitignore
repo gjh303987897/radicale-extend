@@ -1,0 +1,48 @@
+# Local credentials and deployment configuration
+.env
+.env.*
+!.env.example
+!.env.*.example
+secrets/
+config.yaml
+config.local.yaml
+config.local.yml
+
+# Runtime databases (including SQLite sidecar files)
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Python environments and generated packages
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+hook/build/
+hook/dist/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Go binaries, test outputs and local caches
+bin/
+.cache/
+*.exe
+*.test
+*.prof
+coverage.out
+coverage*.html
+
+# Local editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

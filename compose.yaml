@@ -1,0 +1,75 @@
+name: radicale-extend
+x-app: &app
+  image: ${APP_IMAGE:-radicale-extend}:${IMAGE_TAG:-local}
+  build:
+    context: .
+    target: app
+  user: '10001:10001'
+  environment:
+    DAV_USERNAME: ${DAV_USERNAME:-alice}
+  volumes:
+    - ${APP_CONFIG:-./config.example.yaml}:/etc/radicale-extend/config.yaml:ro
+    - state:/data/state
+    - queue:/data/queue
+  secrets:
+    - mcp_token
+    - dav_password
+    - smtp_password
+    - telegram_token
+
+services:
+  init:
+    <<: *app
+    command: [init-db, --config, /etc/radicale-extend/config.yaml]
+    restart: 'no'
+    healthcheck:
+      disable: true
+
+  radicale:
+    image: ${RADICALE_IMAGE:-radicale-extend-radicale}:${IMAGE_TAG:-local}
+    build:
+      context: .
+      target: radicale
+    user: '10001:10001'
+    restart: unless-stopped
+    environment:
+      DAV_USERNAME: ${DAV_USERNAME:-alice}
+      RADICALE_EXTEND_QUEUE: /data/queue/queue.db
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - radicale:/data/radicale
+      - queue:/data/queue
+    secrets:
+      - radicale_users
+      - dav_password
+    ports:
+      - '${DAV_BIND:-127.0.0.1}:${DAV_PORT:-5232}:5232'
+
+  app:
+    <<: *app
+    restart: unless-stopped
+    command: [serve, --config, /etc/radicale-extend/config.yaml]
+    depends_on:
+      radicale:
+        condition: service_healthy
+    ports:
+      - '${MCP_BIND:-127.0.0.1}:${MCP_PORT:-8080}:8080'
+
+volumes:
+  state:
+  queue:
+  radicale:
+
+secrets:
+  mcp_token:
+    file: ${SECRETS_DIR:-./secrets}/mcp_token
+  dav_password:
+    file: ${SECRETS_DIR:-./secrets}/dav_password
+  radicale_users:
+    file: ${SECRETS_DIR:-./secrets}/radicale_users
+  smtp_password:
+    file: ${SECRETS_DIR:-./secrets}/smtp_password
+  telegram_token:
+    file: ${SECRETS_DIR:-./secrets}/telegram_token

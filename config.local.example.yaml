@@ -1,0 +1,9 @@
+# Copy to config.yaml and supply DAV_PASSWORD and MCP_TOKEN through environment.
+listen: 127.0.0.1:8080
+timezone: Asia/Shanghai
+dav:
+  url: http://127.0.0.1:5232/
+  username: alice
+storage:
+  state: data/state/state.db
+  queue: data/queue/queue.db

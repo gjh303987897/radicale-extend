@@ -1,0 +1,104 @@
+name: Publish GHCR images
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag, for example 0.1.0 (latest and sha-* are reserved)'
+        required: true
+        type: string
+      update_latest:
+        description: 'Also publish latest (default branch only)'
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: ghcr-publish
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate dispatch inputs
+        env:
+          IMAGE_TAG: ${{ inputs.tag }}
+          UPDATE_LATEST: ${{ inputs.update_latest }}
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          tag = os.environ['IMAGE_TAG']
+          assert re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}', tag), 'Invalid image tag'
+          assert tag != 'latest' and not tag.startswith('sha-'), 'Reserved image tag'
+          if os.environ['UPDATE_LATEST'] == 'true':
+              assert os.environ['REF'] == 'refs/heads/' + os.environ['DEFAULT_BRANCH'], 'latest requires default branch'
+          PY
+  checks:
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+  publish:
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: app
+            suffix: ''
+          - target: radicale
+            suffix: '-radicale'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Image metadata
+        id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SUFFIX: ${{ matrix.suffix }}
+          IMAGE_TAG: ${{ inputs.tag }}
+          UPDATE_LATEST: ${{ inputs.update_latest }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import os
+          image = 'ghcr.io/' + os.environ['REPOSITORY'].lower() + os.environ['SUFFIX']
+          tags = [image + ':' + os.environ['IMAGE_TAG'], image + ':sha-' + os.environ['COMMIT']]
+          if os.environ['UPDATE_LATEST'] == 'true':
+              tags.append(image + ':latest')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write('tags<<TAGS\n' + '\n'.join(tags) + '\nTAGS\n')
+              f.write('name=' + image + '\n')
+          PY
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.image.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+          provenance: true
+          sbom: true
+      - name: Image digest
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          printf '%s@%s\n' "$IMAGE_NAME" "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
