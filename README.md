@@ -107,6 +107,7 @@ Telegram 示例：
 ```yaml
 telegram:
   enabled: true
+  commands_enabled: true
   token:
     file: /run/secrets/telegram_token
   chat_id: '123456789'
@@ -119,6 +120,20 @@ telegram:
 - Telegram：向 BotFather 创建 Bot，把 Token 写入 `secrets/telegram_token`；先向 Bot 发送 `/start`，通过 Bot API 的 `getUpdates` 确认自己的 `chat.id`，再配置 `telegram.chat_id` 和 `enabled: true`。不要把 Token 或更新内容粘贴到公共日志。
 
 两个渠道默认关闭，启用后只通知显式配置的接收者。所有密钥文件避免尾部多余空格，尾部换行会被移除。
+
+设置 `telegram.commands_enabled: true` 后，`serve` 入口同时运行 Bot 命令接收器，并为绑定的私人聊天注册命令菜单：
+
+| 命令 | 功能 |
+| --- | --- |
+| `/today` | 按 `timezone` 查询今天 00:00 至明天 00:00 的日程，包含全天、跨天、重复实例和今天已结束的日程 |
+| `/next` | 查询从现在起最近的 5 个日程，按开始时间排序，包含进行中的日程；搜索范围为未来 366 天 |
+| `/help`、`/start` | 显示命令与时区说明 |
+
+也可发送“今日日程”“今天的日程”或“最近5个日程”。命令直接通过 DAV 查询所有授权日历，不受通知渠道开关或 30 天提醒生成窗口限制；取消的日程和待办不会列入。详情隐藏规则 `hide_details` 同样生效。当天超过 100 个实例时只显示最早的 100 个并明确提示，长列表自动分条发送。用户主动查询立即回复，不延后到免打扰时段结束。
+
+命令功能默认关闭，仅支持配置的数字私人 `chat_id`；其他用户、群组、编辑消息和指向其他 Bot 的命令都不会触发查询。它使用 Telegram [getUpdates 长轮询](https://core.telegram.org/bots/api#getupdates)，不需要新增公网端口。同一 Token 只能由一个本服务实例接收更新；已设置 webhook 时会记录冲突并重试，不自动删除 webhook。启用前先停止其他轮询程序，必要时自行解除原 webhook；`mcp-stdio` 不接收 Bot 命令。
+
+更新游标和回复队列保存在现有业务 SQLite 中，以事务同时记录，重启后继续处理；每条回复独立重试，最多 8 次，并遵守 `retry_after`。多条回复按原顺序投递；已成功或最终失败的回复正文会被清空。超过 10 分钟的旧命令会跳过。网络发送成功但本地尚未确认时崩溃，仍可能重复回复。`/readyz` 的 `telegram_pending_replies` 和 `telegram_failed_replies` 可检查回复积压或失败，日志不记录收到的私人消息或 Token。上述表是业务数据库的兼容性新增表，不改变 Hook 队列协议。
 
 按日历配置规则时，`calendars` 同时充当服务的集合白名单；留空表示该用户主页中可发现的所有日历：
 
@@ -259,6 +274,7 @@ Go 使用 `init-db --config ...` 初始化数据库，之后再启动 Radicale�
 | `reminder.max_instances` | `10000` | 实例展开数量限制，允许 1～100000 |
 | `reminder.grace` | `10m` | 提醒迟到补发的宽限期 |
 | `smtp.enabled` / `telegram.enabled` | `false` | 渠道必须显式开启 |
+| `telegram.commands_enabled` | `false` | 启用私人聊天的 `/today`、`/next`、`/help` 命令；需要 Telegram 已开启 |
 
 时间间隔使用 Go duration 格式，例如 `30s`、`5m`、`24h`，不能写成 `1d`。两个数据库路径必须不同。配置含未知字段时会报错，修改配置后需要重启服务。
 
@@ -403,6 +419,7 @@ internal/
   dav/                DAV 访问、地址限制和条件写入
   mcpapi/             MCP 工具和 HTTP 接口
   notify/             SMTP、Telegram 投递
+  telegrambot/        私人聊天命令、长轮询与持久化回复队列
   service/            同步、队列消费和调度
   store/              SQLite 数据库与任务状态
 hook/                 独立 Python Hook 包和测试

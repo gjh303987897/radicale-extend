@@ -6,6 +6,7 @@ import (
 	"net/mail"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -90,10 +91,11 @@ type Config struct {
 		To       string `yaml:"to"`
 	} `yaml:"smtp"`
 	Telegram struct {
-		Enabled bool   `yaml:"enabled"`
-		Token   Secret `yaml:"token"`
-		ChatID  string `yaml:"chat_id"`
-		APIURL  string `yaml:"api_url"`
+		CommandsEnabled bool   `yaml:"commands_enabled"`
+		Enabled         bool   `yaml:"enabled"`
+		Token           Secret `yaml:"token"`
+		ChatID          string `yaml:"chat_id"`
+		APIURL          string `yaml:"api_url"`
 	} `yaml:"telegram"`
 }
 
@@ -191,6 +193,12 @@ func (c *Config) Validate() error {
 		u, err = url.Parse(c.Telegram.APIURL)
 		if c.Telegram.Token.Value == "" || strings.ContainsAny(c.Telegram.Token.Value, "/\r\n?#") || c.Telegram.ChatID == "" || err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "https" && u.Scheme != "http") {
 			return errors.New("invalid Telegram configuration")
+		}
+	}
+	if c.Telegram.CommandsEnabled {
+		id, err := strconv.ParseInt(c.Telegram.ChatID, 10, 64)
+		if !c.Telegram.Enabled || err != nil || id <= 0 {
+			return errors.New("Telegram commands require enabled Telegram and a numeric private chat_id")
 		}
 	}
 	for _, r := range c.Calendars {

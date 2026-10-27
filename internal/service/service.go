@@ -517,8 +517,11 @@ func (s *Service) Ready() map[string]any {
 	s.Store.Queue.QueryRow("SELECT count(*) FROM events WHERE state IN ('pending','retry','processing')").Scan(&events)
 	s.Store.Queue.QueryRow("SELECT count(*) FROM events WHERE state='failed'").Scan(&failedEvents)
 	s.Store.DB.QueryRow("SELECT count(*) FROM resources WHERE error!=''").Scan(&unsupported)
+	pendingReplies, failedReplies := 0, 0
+	s.Store.DB.QueryRow("SELECT count(*) FROM telegram_replies WHERE state='pending'").Scan(&pendingReplies)
+	s.Store.DB.QueryRow("SELECT count(*) FROM telegram_replies WHERE state='failed'").Scan(&failedReplies)
 	ok := s.syncOK && !s.lastSync.IsZero() && s.Store.DB.Ping() == nil && s.Store.Queue.Ping() == nil
-	return map[string]any{"ready": ok, "last_sync": s.lastSync, "pending_jobs": pending, "failed_jobs": failed, "queued_events": events, "failed_events": failedEvents, "unsupported_resources": unsupported}
+	return map[string]any{"ready": ok, "last_sync": s.lastSync, "pending_jobs": pending, "failed_jobs": failed, "queued_events": events, "failed_events": failedEvents, "unsupported_resources": unsupported, "telegram_pending_replies": pendingReplies, "telegram_failed_replies": failedReplies}
 }
 func (s *Service) SetReminder(ctx context.Context, resource string, override calendar.Override) error {
 	if override.Mode != "calendar" && override.Mode != "off" && override.Mode != "before" {

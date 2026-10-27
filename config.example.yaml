@@ -41,6 +41,8 @@ smtp:
   to: me@example.com
 telegram:
   enabled: false
+  # Optional private-chat /today, /next and /help commands (serve mode only).
+  commands_enabled: false
   token:
     file: /run/secrets/telegram_token
   chat_id: ''

@@ -166,6 +166,10 @@ func TestNativeRadicaleMCPAndNotifications(t *testing.T) {
 	if created.ETag == "" || created.Item.UID == "" {
 		t.Fatal("missing resource identity")
 	}
+	agenda, err := s.Agenda(ctx, now.Add(2*time.Minute), now.AddDate(0, 0, 1), 5)
+	if err != nil || len(agenda) != 1 || agenda[0].Summary != "Native integration" {
+		t.Fatal("live DAV agenda must include an ongoing event", agenda, err)
+	}
 	// Exercise task completion and undated task search through real MCP + DAV.
 	var task mcpapi.Result
 	call("create_task", map[string]any{"calendar": "/alice/work/", "fields": map[string]any{"summary": "Undated task"}}, &task)
@@ -192,6 +196,10 @@ func TestNativeRadicaleMCPAndNotifications(t *testing.T) {
 	}
 	call("delete_event", map[string]any{"resource": series.Resource, "etag": series.ETag, "recurrence_id": seriesStart.AddDate(0, 0, 2).Format(time.RFC3339)}, nil)
 	call("get_event", map[string]any{"resource": series.Resource}, &series)
+	agenda, err = s.Agenda(ctx, now.Add(2*time.Minute), now.AddDate(0, 0, 4), 5)
+	if err != nil || len(agenda) != 3 || agenda[0].Summary != "Native integration" || agenda[1].Summary != "Series" || agenda[2].Summary != "Single exception" {
+		t.Fatal("agenda recurrence, ordering or excluded instance incorrect", agenda, err)
+	}
 	call("delete_event", map[string]any{"resource": series.Resource, "etag": series.ETag}, nil)
 	if err = s.Sync(ctx, false); err != nil {
 		t.Fatal(err)

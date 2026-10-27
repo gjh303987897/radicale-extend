@@ -235,6 +235,16 @@ func Expand(cal *ical.Calendar, from, to time.Time, loc *time.Location, limit in
 	return ExpandWithStatus(cal, from, to, loc, limit, false)
 }
 func ExpandWithStatus(cal *ical.Calendar, from, to time.Time, loc *time.Location, limit int, includeCompleted bool) ([]Instance, error) {
+	return expand(cal, from, to, loc, limit, includeCompleted, false)
+}
+
+// ExpandOverlapping also returns events that began before the query window and
+// are still in progress. DTEND remains exclusive, including for all-day events.
+func ExpandOverlapping(cal *ical.Calendar, from, to time.Time, loc *time.Location, limit int) ([]Instance, error) {
+	return expand(cal, from, to, loc, limit, false, true)
+}
+
+func expand(cal *ical.Calendar, from, to time.Time, loc *time.Location, limit int, includeCompleted, overlap bool) ([]Instance, error) {
 	kind := Kind(cal)
 	master, err := Master(cal, kind)
 	if err != nil {
@@ -246,6 +256,13 @@ func ExpandWithStatus(cal *ical.Calendar, from, to time.Time, loc *time.Location
 	}
 	if start.IsZero() {
 		return []Instance{}, nil
+	}
+	queryStart := from
+	if overlap {
+		queryStart = from.Add(-end.Sub(start))
+		if day {
+			queryStart = queryStart.Add(-24 * time.Hour)
+		}
 	}
 	for _, comp := range cal.Children {
 		if p := comp.Props.Get("RECURRENCE-ID"); p != nil && p.Params.Get("RANGE") != "" {
@@ -274,7 +291,7 @@ func ExpandWithStatus(cal *ical.Calendar, from, to time.Time, loc *time.Location
 			if count > 1000000 {
 				return nil, errors.New("recurrence iteration limit exceeded")
 			}
-			if !t.Before(from) {
+			if !t.Before(queryStart) {
 				candidates[dateKey(t, day)] = t
 				if len(candidates) > limit {
 					return nil, errors.New("recurrence instance limit exceeded")
@@ -337,7 +354,11 @@ func ExpandWithStatus(cal *ical.Calendar, from, to time.Time, loc *time.Location
 		if Text(comp, "STATUS") == "CANCELLED" || (!includeCompleted && (Text(comp, "STATUS") == "COMPLETED" || comp.Props.Get("COMPLETED") != nil)) {
 			continue
 		}
-		if s.Before(from) || !s.Before(to) {
+		matches := !s.Before(from) && s.Before(to)
+		if overlap {
+			matches = s.Before(to) && (finish.After(from) || (finish.Equal(s) && !s.Before(from)))
+		}
+		if !matches {
 			continue
 		}
 		view, e := Describe(comp, loc)

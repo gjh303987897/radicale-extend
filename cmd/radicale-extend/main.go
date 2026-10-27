@@ -18,6 +18,7 @@ import (
 	"radicale-extend/internal/mcpapi"
 	"radicale-extend/internal/service"
 	"radicale-extend/internal/store"
+	"radicale-extend/internal/telegrambot"
 )
 
 func main() {
@@ -86,6 +87,8 @@ func run() error {
 	}
 	workerDone := make(chan struct{})
 	go func() { defer close(workerDone); s.Run(ctx) }()
+	botDone := make(chan struct{})
+	go func() { defer close(botDone); telegrambot.New(s).Run(ctx) }()
 	httpServer := &http.Server{Addr: c.Listen, Handler: mcpapi.HTTP(s, server), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	failure := make(chan error, 1)
 	go func() { failure <- httpServer.ListenAndServe() }()
@@ -100,6 +103,7 @@ func run() error {
 	shutdownErr := httpServer.Shutdown(shutdownCtx)
 	cancel()
 	<-workerDone
+	<-botDone
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

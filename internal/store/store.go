@@ -65,6 +65,9 @@ func (s *Store) migrate() error {
  CREATE TABLE IF NOT EXISTS overrides(collection TEXT NOT NULL,uid TEXT NOT NULL,mode TEXT NOT NULL,before_seconds INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(collection,uid));
  CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,resource TEXT NOT NULL,collection TEXT NOT NULL,uid TEXT NOT NULL,instance TEXT NOT NULL,kind TEXT NOT NULL,channel TEXT NOT NULL,source TEXT NOT NULL,revision TEXT NOT NULL,at INTEGER NOT NULL,due INTEGER NOT NULL,expires INTEGER NOT NULL,title TEXT NOT NULL,body TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,lease INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL DEFAULT '');
  CREATE INDEX IF NOT EXISTS jobs_due ON jobs(state,due);
+ CREATE TABLE IF NOT EXISTS telegram_offsets(scope TEXT PRIMARY KEY,offset INTEGER NOT NULL);
+ CREATE TABLE IF NOT EXISTS telegram_replies(scope TEXT NOT NULL,update_id INTEGER NOT NULL,part INTEGER NOT NULL,body TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,due INTEGER NOT NULL,PRIMARY KEY(scope,update_id,part));
+ CREATE INDEX IF NOT EXISTS telegram_replies_due ON telegram_replies(scope,state,due);
  `}} {
 		var version int
 		if err := entry.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
