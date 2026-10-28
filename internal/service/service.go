@@ -540,8 +540,11 @@ func (s *Service) Ready() map[string]any {
 	pendingReplies, failedReplies := 0, 0
 	s.Store.DB.QueryRow("SELECT count(*) FROM telegram_replies WHERE state='pending'").Scan(&pendingReplies)
 	s.Store.DB.QueryRow("SELECT count(*) FROM telegram_replies WHERE state='failed'").Scan(&failedReplies)
+	weekPending, weekFailed := 0, 0
+	s.Store.DB.QueryRow("SELECT (SELECT count(*) FROM week_requests WHERE state IN ('pending','processing'))+(SELECT count(*) FROM week_deliveries WHERE state IN ('pending','processing'))").Scan(&weekPending)
+	s.Store.DB.QueryRow("SELECT (SELECT count(*) FROM week_requests WHERE state='failed')+(SELECT count(*) FROM week_deliveries WHERE state='failed')").Scan(&weekFailed)
 	ok := s.syncOK && !s.lastSync.IsZero() && s.Store.DB.Ping() == nil && s.Store.Queue.Ping() == nil
-	return map[string]any{"ready": ok, "last_sync": s.lastSync, "pending_jobs": pending, "failed_jobs": failed, "queued_events": events, "failed_events": failedEvents, "unsupported_resources": unsupported, "telegram_pending_replies": pendingReplies, "telegram_failed_replies": failedReplies}
+	return map[string]any{"ready": ok, "last_sync": s.lastSync, "pending_jobs": pending, "failed_jobs": failed, "queued_events": events, "failed_events": failedEvents, "unsupported_resources": unsupported, "telegram_pending_replies": pendingReplies, "telegram_failed_replies": failedReplies, "weekly_pending": weekPending, "weekly_failed": weekFailed}
 }
 func (s *Service) SetReminder(ctx context.Context, resource string, override calendar.Override) error {
 	if override.Mode != "calendar" && override.Mode != "off" && override.Mode != "before" {

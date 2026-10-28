@@ -103,6 +103,9 @@ func (c *Channels) sendTelegram(ctx context.Context, j store.Job) error {
 	return &Error{Permanent: code >= 400 && code < 500 && code != 429, RetryAfter: retry, Message: fmt.Sprintf("Telegram delivery failed (status %d)", code)}
 }
 func (c *Channels) sendSMTP(ctx context.Context, j store.Job) (err error) {
+	return c.sendSMTPContent(ctx, j, nil)
+}
+func (c *Channels) sendSMTPContent(ctx context.Context, j store.Job, picture []byte) (err error) {
 	cfg := c.Config.SMTP
 	if !cfg.Enabled {
 		return &Error{Permanent: true, Message: "SMTP disabled"}
@@ -168,6 +171,17 @@ func (c *Channels) sendSMTP(ctx context.Context, j store.Job) (err error) {
 		return e
 	}
 	var message bytes.Buffer
+	if picture != nil {
+		err = writeImageMail(writer, j, from.String(), to.String(), picture)
+		closeErr := writer.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		return client.Quit()
+	}
 	fmt.Fprintf(&message, "From: %s\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nMessage-ID: <%s@radicale-extend>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n", from.String(), to.String(), mime.QEncoding.Encode("UTF-8", strings.ReplaceAll(strings.ReplaceAll(j.Title, "\r", " "), "\n", " ")), time.Now().UTC().Format(time.RFC1123Z), j.ID)
 	encoded := base64.StdEncoding.EncodeToString([]byte(j.Body))
 	for len(encoded) > 76 {

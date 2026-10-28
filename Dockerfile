@@ -9,11 +9,16 @@ ARG TARGETOS
 ARG TARGETARCH
 RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/radicale-extend ./cmd/radicale-extend
 
+FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS fonts
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-noto-cjk
+
 FROM debian:bookworm-slim AS app
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 app && useradd --uid 10001 --gid 10001 --no-create-home app \
     && install -d -o 10001 -g 10001 /data/state /data/queue
 COPY --from=build /out/radicale-extend /usr/local/bin/radicale-extend
+COPY --from=fonts /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
+COPY --from=fonts /usr/share/doc/fonts-noto-cjk/copyright /usr/share/doc/fonts-noto-cjk/copyright
 USER 10001:10001
 EXPOSE 8080
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s CMD ["radicale-extend","healthcheck"]

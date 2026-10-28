@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image/png"
 	"io"
 	"net"
 	"net/http"
@@ -16,15 +17,28 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/image/font/gofont/goregular"
 	"radicale-extend/internal/config"
 	"radicale-extend/internal/mcpapi"
 	"radicale-extend/internal/service"
 	"radicale-extend/internal/store"
+	"radicale-extend/internal/week"
 )
 
 type capture struct{ jobs []store.Job }
 
 func (c *capture) Send(_ context.Context, j store.Job) error { c.jobs = append(c.jobs, j); return nil }
+
+type captureImages struct{ channels map[string]int }
+
+func (c *captureImages) SendImage(_ context.Context, j store.Job, data []byte) error {
+	image, err := png.DecodeConfig(bytes.NewReader(data))
+	if err != nil || image.Width < 1000 {
+		return fmt.Errorf("invalid weekly image")
+	}
+	c.channels[j.Channel]++
+	return nil
+}
 func TestNativeRadicaleMCPAndNotifications(t *testing.T) {
 	python := os.Getenv("RADICALE_PYTHON")
 	if python == "" {
@@ -169,6 +183,28 @@ func TestNativeRadicaleMCPAndNotifications(t *testing.T) {
 	agenda, err := s.Agenda(ctx, now.Add(2*time.Minute), now.AddDate(0, 0, 1), 5)
 	if err != nil || len(agenda) != 1 || agenda[0].Summary != "Native integration" {
 		t.Fatal("live DAV agenda must include an ongoing event", agenda, err)
+	}
+	// Exercise the weekly pipeline with real DAV and the actual PNG renderer;
+	// both delivery channels are captured locally and never leave this process.
+	fontPath := filepath.Join(dir, "test-font.ttf")
+	if err = os.WriteFile(fontPath, goregular.TTF, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Weekly.Enabled = false
+	cfg.Weekly.FontFile = fontPath
+	cfg.Weekly.FontIndex = 0
+	imageSink := &captureImages{channels: map[string]int{}}
+	weekly := week.New(s)
+	weekly.Now = s.Now
+	weekly.Sender = imageSink
+	if _, err = weekly.QueueWeek(ctx, "native-week-image"); err != nil {
+		t.Fatal(err)
+	}
+	if err = weekly.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if imageSink.channels["smtp"] != 1 || imageSink.channels["telegram"] != 1 {
+		t.Fatal("weekly dual-channel delivery missing", imageSink.channels)
 	}
 	// Exercise task completion and undated task search through real MCP + DAV.
 	var task mcpapi.Result
@@ -329,6 +365,15 @@ func TestNativeRadicaleMCPAndNotifications(t *testing.T) {
 	}
 	s.Now = func() time.Time { return now }
 	s.Sender = sink
+	weekly = week.New(s)
+	weekly.Now = s.Now
+	weekly.Sender = imageSink
+	if err = weekly.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if imageSink.channels["smtp"] != 1 || imageSink.channels["telegram"] != 1 {
+		t.Fatal("restart duplicated weekly image", imageSink.channels)
+	}
 	if err = s.Sync(ctx, true); err != nil {
 		t.Fatal(err)
 	}

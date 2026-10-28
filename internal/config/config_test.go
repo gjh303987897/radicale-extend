@@ -29,6 +29,17 @@ func TestSecretsAndStrictConfig(t *testing.T) {
 	if err != nil || c.DAV.Password.Value != "secret-value" {
 		t.Fatal(err)
 	}
+	if !c.Weekly.Enabled || c.Weekly.At != "08:00" || c.Weekly.MaxEvents != 500 || len(c.Weekly.Channels) != 2 {
+		t.Fatal("unexpected weekly defaults", c.Weekly)
+	}
+	for _, line := range []string{"weekly:\n  at: '25:00'\n", "weekly:\n  max_events: 2001\n", "weekly:\n  channels: [telegram, telegram]\n", "weekly:\n  catch_up: 0s\n"} {
+		if err = os.WriteFile(file, []byte("dav:\n  url: http://localhost:5232/\n  username: alice\n"+line), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = Load(file); err == nil {
+			t.Fatal("invalid weekly config accepted", line)
+		}
+	}
 	os.WriteFile(file, []byte("unexpected: true\n"), 0600)
 	if _, err = Load(file); err == nil {
 		t.Fatal("unknown fields accepted")

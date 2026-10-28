@@ -9,6 +9,7 @@ subprocess.run([sys.executable, "scripts/init_secrets.py", "--directory", str(di
 config = yaml.safe_load(Path("config.example.yaml").read_text())
 config["sync_interval"] = "2s"
 config["debounce"] = "0s"
+config["weekly"]["enabled"] = False
 config["reminder"]["default_before"] = "0s"
 config["smtp"].update(enabled=True, host="mock-channels", port=2525, security="none", username="")
 config["telegram"].update(enabled=True, chat_id="12345", api_url="http://mock-channels:8081")

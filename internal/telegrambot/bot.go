@@ -33,11 +33,16 @@ type EventEditor interface {
 	EditEventTitle(context.Context, store.EventReference, string, bool) (string, error)
 }
 
+type WeekQueue interface {
+	QueueWeek(context.Context, string) (bool, error)
+}
+
 type Bot struct {
 	Config          *config.Config
 	Store           *store.Store
 	Agenda          Agenda
 	Editor          EventEditor
+	Week            WeekQueue
 	HTTP            *http.Client
 	Sender          notify.Sender
 	Now             func() time.Time
@@ -118,6 +123,7 @@ func (b *Bot) setup(ctx context.Context) error {
 		"commands": []map[string]string{
 			{"command": "today", "description": "列出今天的日程"},
 			{"command": "next", "description": "列出最近日程：/next [N]，默认 5 条，最多 20 条"},
+			{"command": "week", "description": "生成未来七天日历图片，发送至已启用的通知渠道"},
 			{"command": "event", "description": "查看事件及提醒规则：/event ID"},
 			{"command": "title", "description": "编辑选中事件标题：/title ID 新标题"},
 			{"command": "remind", "description": "修改提醒规则：/remind ID smtp|telegram|all 15m|off|default"},
@@ -144,7 +150,7 @@ type Update struct {
 	} `json:"message"`
 }
 
-const help = "日程管理\n/today — 今天的日程（含全天、跨天和已结束日程）\n/next [N] — 从现在起最近 N 个日程，默认 5 条，N 为 1–20（含进行中日程，查询未来 366 天）\n/event ID — 查看事件及提醒规则\n/title ID 新标题 — 编辑标题\n/remind ID smtp|telegram|all 15m|1h|off|default — 修改提醒规则：提前量、关闭或恢复继承\n重复日程默认仅修改选中的那一次；/title_series 和 /remind_series 修改整个系列（已有单次提醒覆盖仍优先）。\nID 来自日程列表，有效期 24 小时。标题最多 200 字。SMTP 等渠道仍需在服务端启用。\n/help — 使用说明\n按服务器配置的时区显示。"
+const help = "日程管理\n/today — 今天的日程（含全天、跨天和已结束日程）\n/next [N] — 从现在起最近 N 个日程，默认 5 条，N 为 1–20（含进行中日程，查询未来 366 天）\n/week — 手动发送今天起连续七天的日程图（已启用的 SMTP／Telegram 渠道）\n/event ID — 查看事件及提醒规则\n/title ID 新标题 — 编辑标题\n/remind ID smtp|telegram|all 15m|1h|off|default — 修改提醒规则：提前量、关闭或恢复继承\n重复日程默认仅修改选中的那一次；/title_series 和 /remind_series 修改整个系列（已有单次提醒覆盖仍优先）。\nID 来自日程列表，有效期 24 小时。标题最多 200 字。SMTP 等渠道仍需在服务端启用。\n/help — 使用说明\n按服务器配置的时区显示。"
 
 func (b *Bot) reply(ctx context.Context, u Update) []string {
 	m := u.Message
@@ -168,6 +174,22 @@ func (b *Bot) reply(ctx context.Context, u Update) []string {
 	}
 	if command == "/event" || command == "/title" || command == "/title_series" || command == "/remind" || command == "/remind_series" {
 		return b.editReply(ctx, command, fields[1:])
+	}
+	if command == "/week" {
+		if len(fields) != 1 {
+			return []string{"用法：/week（从今天起连续七天，发送至已启用的 SMTP／Telegram 渠道）"}
+		}
+		if b.Week == nil {
+			return []string{"周视图图片服务暂不可用。"}
+		}
+		queued, err := b.Week.QueueWeek(ctx, service.Hash(b.scope, strconv.FormatInt(u.ID, 10)))
+		if err != nil {
+			return []string{"未能加入图片发送队列。请确认通知渠道已启用，并至少间隔一分钟后重试；队列繁忙时请稍后再试。"}
+		}
+		if !queued {
+			return []string{"已收到这次图片请求，无需重复提交。"}
+		}
+		return []string{"已加入图片队列，将通过已启用的 SMTP／Telegram 渠道发送未来七天日程图；未启用的渠道不会发送。"}
 	}
 	limit := 5
 	if command == "/next" {

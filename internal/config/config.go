@@ -80,6 +80,15 @@ type Config struct {
 		Start string `yaml:"start"`
 		End   string `yaml:"end"`
 	} `yaml:"quiet"`
+	Weekly struct {
+		Enabled   bool     `yaml:"enabled"`
+		At        string   `yaml:"at"`
+		Channels  []string `yaml:"channels"`
+		FontFile  string   `yaml:"font_file"`
+		FontIndex int      `yaml:"font_index"`
+		MaxEvents int      `yaml:"max_events"`
+		CatchUp   Duration `yaml:"catch_up"`
+	} `yaml:"weekly"`
 	SMTP struct {
 		Enabled  bool   `yaml:"enabled"`
 		Host     string `yaml:"host"`
@@ -111,6 +120,13 @@ func Load(path string) (*Config, error) {
 	c.SMTP.Port = 587
 	c.SMTP.Security = "starttls"
 	c.Telegram.APIURL = "https://api.telegram.org"
+	c.Weekly.Enabled = true
+	c.Weekly.At = "08:00"
+	c.Weekly.Channels = []string{"smtp", "telegram"}
+	c.Weekly.FontFile = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+	c.Weekly.FontIndex = 2
+	c.Weekly.MaxEvents = 500
+	c.Weekly.CatchUp = Duration(time.Hour)
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -155,6 +171,19 @@ func (c *Config) Validate() error {
 	}
 	if _, err = time.Parse("15:04", c.Reminder.AllDayAt); err != nil {
 		return errors.New("invalid all_day_at")
+	}
+	if _, err = time.Parse("15:04", c.Weekly.At); err != nil {
+		return errors.New("invalid weekly.at")
+	}
+	if c.Weekly.MaxEvents < 1 || c.Weekly.MaxEvents > 2000 || c.Weekly.FontIndex < 0 || c.Weekly.FontIndex > 32 || c.Weekly.FontFile == "" || c.Weekly.CatchUp.Value() < time.Minute || c.Weekly.CatchUp.Value() > 24*time.Hour {
+		return errors.New("invalid weekly rendering or scheduling limits")
+	}
+	seenWeekly := map[string]bool{}
+	for _, ch := range c.Weekly.Channels {
+		if (ch != "smtp" && ch != "telegram") || seenWeekly[ch] {
+			return errors.New("invalid or duplicate weekly channel")
+		}
+		seenWeekly[ch] = true
 	}
 	if (c.Quiet.Start == "") != (c.Quiet.End == "") {
 		return errors.New("both quiet start and end are required")

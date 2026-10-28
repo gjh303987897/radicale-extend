@@ -70,6 +70,9 @@ func (s *Store) migrate() error {
  CREATE INDEX IF NOT EXISTS telegram_replies_due ON telegram_replies(scope,state,due);
  CREATE TABLE IF NOT EXISTS channel_reminders(collection TEXT NOT NULL,uid TEXT NOT NULL,instance TEXT NOT NULL,channel TEXT NOT NULL,mode TEXT NOT NULL,before_seconds INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(collection,uid,instance,channel));
  CREATE TABLE IF NOT EXISTS telegram_event_refs(scope TEXT NOT NULL,id TEXT NOT NULL,resource TEXT NOT NULL,collection TEXT NOT NULL,uid TEXT NOT NULL,instance TEXT NOT NULL,etag TEXT NOT NULL,expires INTEGER NOT NULL,PRIMARY KEY(scope,id));
+ CREATE TABLE IF NOT EXISTS week_requests(id TEXT PRIMARY KEY,start_date TEXT NOT NULL,kind TEXT NOT NULL,created INTEGER NOT NULL,due INTEGER NOT NULL,expires INTEGER NOT NULL,state TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,lease INTEGER NOT NULL DEFAULT 0);
+ CREATE TABLE IF NOT EXISTS week_deliveries(request_id TEXT NOT NULL REFERENCES week_requests(id) ON DELETE CASCADE,channel TEXT NOT NULL,title TEXT NOT NULL,caption TEXT NOT NULL,png BLOB NOT NULL,policy TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,due INTEGER NOT NULL,lease INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(request_id,channel));
+ CREATE INDEX IF NOT EXISTS week_due ON week_deliveries(state,due);
  `}} {
 		var version int
 		if err := entry.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {

@@ -39,8 +39,9 @@ Hook 将原始变更快速写入本地队列，Go Worker 再通过 CalDAV 读取
 - RRULE、RDATE、EXDATE、RECURRENCE-ID 单次改期/删除，IANA 时区、夏令时、浮动时间和全天事件。
 - VALARM 相对开始/结束、绝对时间、REPEAT/DURATION；原提醒收件人不会被用作消息接收者。
 - SQLite 持久化、任务租约、独立渠道重试、变更合并、免打扰和隐私隐藏。
+- 每天 08:00（可配置）发送今天起连续七天的日历 PNG；支持 SMTP 内嵌图片／附件及 Telegram 图片，Bot `/week` 可手动触发。
 - 提醒顺序：服务端显式覆盖/关闭 > VALARM > 默认提前 15 分钟。无提醒的全天事件当天 09:00 通知，默认时区 Asia/Shanghai。
-- 不包含联系人管理、多用户、每日汇总、会议邀请邮件、Telegram 按钮及 OAuth 自动发现；HTTP 客户端需要能自行配置 Authorization 请求头。
+- 不包含联系人管理、多用户、会议邀请邮件、Telegram 按钮及 OAuth 自动发现；HTTP 客户端需要能自行配置 Authorization 请求头。
 - 不支持自定义 VTIMEZONE 时区定义、RDATE PERIOD、RECURRENCE-ID RANGE 等高级提醒语义，原数据保留，调度报告不支持并取消该资源的待发提醒，不进行猜测。Radicale 本身仍可存储这些数据。
 - VJOURNAL 由 Radicale 保管，本服务不调度。没有 DTSTART/DUE 的待办可创建、查询和完成，但没有时间提醒。
 
@@ -127,6 +128,7 @@ telegram:
 | --- | --- |
 | `/today` | 按 `timezone` 查询今天 00:00 至明天 00:00 的日程，包含全天、跨天、重复实例和今天已结束的日程 |
 | `/next [N]` | 查询从现在起最近的 N 个日程；N 为 1–20 的整数，省略默认 5 条。按开始时间排序，包含进行中的日程；搜索范围为未来 366 天 |
+| `/week` | 生成今天起连续七天的周视图 PNG，经已启用的 SMTP／Telegram 渠道发送 |
 | `/event ID` | 查看选中事件及 SMTP、Telegram 的提醒规则和渠道状态 |
 | `/title ID 新标题` | 修改选中的事件标题；重复日程默认只修改选中的那一次 |
 | `/remind ID smtp\|telegram\|all 15m\|off\|default` | 修改提醒规则：分渠道设置提前量、关闭提醒或恢复继承 |
@@ -162,6 +164,35 @@ Bot 管理的是个人事件提醒规则，不提供 SMTP 账号、收件人、�
 命令功能默认关闭，仅支持配置的数字私人 `chat_id`；其他用户、群组、编辑消息和指向其他 Bot 的命令都不会触发查询。它使用 Telegram [getUpdates 长轮询](https://core.telegram.org/bots/api#getupdates)，不需要新增公网端口。同一 Token 只能由一个本服务实例接收更新；已设置 webhook 时会记录冲突并重试，不自动删除 webhook。启用前先停止其他轮询程序，必要时自行解除原 webhook；`mcp-stdio` 不接收 Bot 命令。
 
 更新游标和回复队列保存在现有业务 SQLite 中，以事务同时记录，重启后继续处理；每条回复独立重试，最多 8 次，并遵守 `retry_after`。多条回复按原顺序投递；已成功或最终失败的回复正文会被清空。超过 10 分钟的旧命令会跳过。网络发送成功但本地尚未确认时崩溃，仍可能重复回复。`/readyz` 的 `telegram_pending_replies` 和 `telegram_failed_replies` 可检查回复积压或失败，日志不记录收到的私人消息或 Token。上述表是业务数据库的兼容性新增表，不改变 Hook 队列协议。
+
+每天自动发送的七天日程图：
+
+```yaml
+weekly:
+  enabled: true
+  at: '08:00'       # 使用 timezone；默认 Asia/Shanghai
+  channels: [smtp, telegram]
+  catch_up: 1h     # 08:00–09:00 内可补发；之后跳过，等下一天
+  max_events: 500  # 1–2000，超量会在图片中标注
+  font_file: /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
+  font_index: 2    # 配套 Noto 字体合集中的简体中文
+```
+
+图片以请求所在日期为第一列，连续七个自然日，例如周三至下周二；横向日期、纵向时间。按日历固定配色，全天事件置顶、跨天事件拆成每日色块、重叠事件并列显示。时间轴默认 07:00–22:00，有夜间日程时自动扩展至相应时段。过于密集的重叠块或全天事件以 `+N` 标记，完整信息仍可用 Bot 查询或日历客户端查看。周视图包含重复实例和单次例外，排除已取消事件与待办，遵守集合白名单、日历渠道限制和 `hide_details`；关闭某个事件的定时提醒不会把它从日程概览中删除。
+
+![周视图样张（模拟日程）](docs/week-preview.png)
+
+`weekly.enabled` 默认 `true`，时间默认 `08:00`，**已有配置省略 weekly 时也采用此默认值**。仅在全局已启用的渠道发送，不自动配置 SMTP 或修改 Telegram 接收者。设为 `false` 只关闭每日自动发送，手动 `/week` 仍可使用。每日任务在配置时区按日期去重，重启不会重新发送已经成功的渠道；恢复时间超出 `catch_up` 则跳过旧的每日图片。自定义时间恰逢夏令时不存在的本地时刻时跳过当天；重复出现的本地时刻仍只创建一份日报。
+
+手动 `/week` 仅响应绑定的私人聊天，立即入持久化队列，向 `weekly.channels` 中全局已启用的渠道发送。请求至少间隔一分钟，重复接收同一个 Telegram 更新不会重复入队，最多保留 20 份正在生成／待发的图片请求。自动发送遵守免打扰，手动请求立即处理；图片到期后不继续投递。SMTP 邮件包含纯文本、可内嵌图片的 HTML 和 PNG，Telegram 使用 [sendPhoto](https://core.telegram.org/bots/api#sendphoto)。每个渠道独立重试，最多 8 次，遵守 Telegram `retry_after`；远端成功、本地尚未确认时崩溃仍可能重复发送。
+
+Go 直接绘制固定 1960×1840 画布，串行处理生成和投递，不启动浏览器、不使用 Python 绘图。画布约 13.8 MiB，PNG 上限 4 MiB；两个渠道可使用同一幅图时只绘制一次。周图查询采用带时区缓冲的 CalDAV 时间过滤，每个查询响应上限 32 MiB，避免加载整份历史日历。默认最多展示 500 个实例，超量或无法可靠解析时明确标注或报告，不静默猜测。开发机的 13 条中文模拟日程样张约 63 ms、PNG 166 KiB、单次累计分配约 16.4 MiB；这是样本基准，包含真实查询的服务总 RSS 和峰值仍会受日历规模、字体和 Go 运行时影响。
+
+请求和待发 PNG 保存在现有业务 SQLite，租约支持重启恢复；每个渠道成功、失败、取消或过期后清空其图片字段，数据库空间可复用，终态元数据保留七天。配置中的接收者或隐私／渠道策略改变后，旧图片任务会取消，需重新生成。`/readyz` 的 `weekly_pending`、`weekly_failed` 可用于排查积压或失败；日志不输出图片、日程标题或凭据。保持业务状态卷即可持久化图片队列，无需新增 Compose 卷或公网接口。
+
+配套 Go 镜像包含 [Noto CJK](https://github.com/notofonts/noto-cjk) 简体中文字体及许可证。原生运行需自行提供可信的中文 TTF／OTF／TTC 文件，并调整 `font_file`、`font_index`（单字体文件通常为 0）；字体缺失或格式不支持时，图片任务会失败并重试，不影响 DAV 和普通通知。图片是生成时的快照，投递重试复用该快照；需要最新修改时再次发送 `/week`。
+
+本地验证只使用替身 SMTP／Telegram、临时 SQLite、原生 Radicale 和合成日程；不调用本地 Docker，也不向真实渠道发送测试图片。GitHub Runner 才负责镜像构建及容器字体安装验证。当前功能尚未在部署服务器验证或上线。
 
 按日历配置规则时，`calendars` 同时充当服务的集合白名单；留空表示该用户主页中可发现的所有日历：
 
@@ -303,6 +334,11 @@ Go 使用 `init-db --config ...` 初始化数据库，之后再启动 Radicale�
 | `reminder.grace` | `10m` | 提醒迟到补发的宽限期 |
 | `smtp.enabled` / `telegram.enabled` | `false` | 渠道必须显式开启 |
 | `telegram.commands_enabled` | `false` | 启用私人聊天的 `/today`、`/next`、`/help` 命令；需要 Telegram 已开启 |
+| `weekly.enabled` / `weekly.at` | `true` / `'08:00'` | 自动七天日程图及配置时区中的发送时刻 |
+| `weekly.channels` | `[smtp, telegram]` | 仅在对应全局渠道也启用时发送 |
+| `weekly.catch_up` | `1h` | 自动补发窗口及单次图片请求的有效期，1 分钟至 24 小时 |
+| `weekly.max_events` | `500` | 周图事件上限，允许 1–2000 |
+| `weekly.font_file` / `weekly.font_index` | 配套 Noto CJK TTC / `2` | 中文字体路径及合集索引，单字体文件通常设 0 |
 
 时间间隔使用 Go duration 格式，例如 `30s`、`5m`、`24h`，不能写成 `1d`。两个数据库路径必须不同。配置含未知字段时会报错，修改配置后需要重启服务。
 
@@ -448,6 +484,8 @@ internal/
   mcpapi/             MCP 工具和 HTTP 接口
   notify/             SMTP、Telegram 投递
   telegrambot/        私人聊天命令、长轮询与持久化回复队列
+  week/               每日周图调度、请求去重、独立渠道重试
+  weekimage/          固定画布周视图 PNG、中文字体与碰撞排版
   service/            同步、队列消费和调度
   store/              SQLite 数据库与任务状态
 hook/                 独立 Python Hook 包和测试

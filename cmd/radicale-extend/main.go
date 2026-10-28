@@ -19,6 +19,7 @@ import (
 	"radicale-extend/internal/service"
 	"radicale-extend/internal/store"
 	"radicale-extend/internal/telegrambot"
+	"radicale-extend/internal/week"
 )
 
 func main() {
@@ -88,7 +89,12 @@ func run() error {
 	workerDone := make(chan struct{})
 	go func() { defer close(workerDone); s.Run(ctx) }()
 	botDone := make(chan struct{})
-	go func() { defer close(botDone); telegrambot.New(s).Run(ctx) }()
+	weekly := week.New(s)
+	weekDone := make(chan struct{})
+	go func() { defer close(weekDone); weekly.Run(ctx) }()
+	bot := telegrambot.New(s)
+	bot.Week = weekly
+	go func() { defer close(botDone); bot.Run(ctx) }()
 	httpServer := &http.Server{Addr: c.Listen, Handler: mcpapi.HTTP(s, server), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	failure := make(chan error, 1)
 	go func() { failure <- httpServer.ListenAndServe() }()
@@ -104,6 +110,7 @@ func run() error {
 	cancel()
 	<-workerDone
 	<-botDone
+	<-weekDone
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

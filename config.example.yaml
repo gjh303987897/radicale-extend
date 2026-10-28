@@ -39,6 +39,14 @@ smtp:
     file: /run/secrets/smtp_password
   from: calendar@example.com
   to: me@example.com
+weekly:
+  enabled: true
+  at: '08:00'
+  channels: [smtp, telegram]
+  catch_up: 1h
+  max_events: 500
+  font_file: /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
+  font_index: 2
 telegram:
   enabled: false
   # Optional private-chat agenda, reminder inspection and event editing commands (serve only).

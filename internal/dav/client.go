@@ -43,6 +43,12 @@ type Client struct {
 	selected           map[string]bool
 }
 
+type reportLimitKey struct{}
+type boundedBody struct {
+	io.Reader
+	io.Closer
+}
+
 func New(c *config.Config) (*Client, error) {
 	u, err := url.Parse(c.DAV.URL)
 	if err != nil {
@@ -107,6 +113,9 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, errors.New("DAV connection failed")
+	}
+	if limit, ok := req.Context().Value(reportLimitKey{}).(int64); ok && limit > 0 {
+		resp.Body = &boundedBody{Reader: io.LimitReader(resp.Body, limit), Closer: resp.Body}
 	}
 	return resp, nil
 }
@@ -237,11 +246,26 @@ func Encode(cal *ical.Calendar) (string, error) {
 	return b.String(), err
 }
 func (c *Client) All(ctx context.Context, col string) ([]Object, error) {
+	return c.query(ctx, col, &caldav.CalendarQuery{CompFilter: caldav.CompFilter{Name: "VCALENDAR"}})
+}
+
+// EventsWindow bounds the server response and avoids loading calendar history.
+// A timezone buffer includes floating/date-only values regardless of the DAV
+// server's fallback timezone. The caller applies the exact local window again.
+func (c *Client) EventsWindow(ctx context.Context, col string, from, to time.Time) ([]Object, error) {
+	if !to.After(from) || to.Sub(from) > 8*24*time.Hour {
+		return nil, errors.New("invalid event query window")
+	}
+	ctx = context.WithValue(ctx, reportLimitKey{}, int64(32<<20))
+	return c.query(ctx, col, &caldav.CalendarQuery{CompFilter: caldav.CompFilter{Name: "VCALENDAR", Comps: []caldav.CompFilter{{Name: "VEVENT", Start: from.Add(-26 * time.Hour).UTC(), End: to.Add(26 * time.Hour).UTC()}}}})
+}
+
+func (c *Client) query(ctx context.Context, col string, query *caldav.CalendarQuery) ([]Object, error) {
 	col, err := c.Collection(col)
 	if err != nil {
 		return nil, err
 	}
-	items, err := c.cal.QueryCalendar(ctx, col, &caldav.CalendarQuery{CompFilter: caldav.CompFilter{Name: "VCALENDAR"}})
+	items, err := c.cal.QueryCalendar(ctx, col, query)
 	if err != nil {
 		return nil, errors.New("DAV calendar query failed")
 	}

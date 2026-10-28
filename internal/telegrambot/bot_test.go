@@ -203,14 +203,14 @@ func TestSetupMenuWebhookAndRedaction(t *testing.T) {
 				}
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
-			if body.Scope.Type != "chat" || body.Scope.ChatID != 123 || len(body.Commands) != 8 {
+			if body.Scope.Type != "chat" || body.Scope.ChatID != 123 || len(body.Commands) != 9 {
 				t.Error("invalid menu scope", body)
 			}
 			names := map[string]bool{}
 			for _, command := range body.Commands {
 				names[command.Command] = true
 			}
-			if !names["event"] || !names["remind"] || names["reminders"] {
+			if !names["event"] || !names["remind"] || !names["week"] || names["reminders"] {
 				t.Error("menu must advertise canonical event/remind commands", names)
 			}
 			menu = true
