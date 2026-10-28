@@ -117,7 +117,7 @@ func (b *Bot) setup(ctx context.Context) error {
 		"scope": map[string]any{"type": "chat", "chat_id": chat},
 		"commands": []map[string]string{
 			{"command": "today", "description": "列出今天的日程"},
-			{"command": "next", "description": "列出最近 5 个日程"},
+			{"command": "next", "description": "列出最近日程：/next [N]，默认 5 条，最多 20 条"},
 			{"command": "event", "description": "查看事件与提醒规则：/event ID"},
 			{"command": "reminders", "description": "查看当前提醒规则：/reminders ID"},
 			{"command": "title", "description": "编辑选中事件标题：/title ID 新标题"},
@@ -145,7 +145,7 @@ type Update struct {
 	} `json:"message"`
 }
 
-const help = "日程管理\n/today — 今天的日程（含全天、跨天和已结束日程）\n/next — 从现在起最近 5 个日程（含进行中日程，查询未来 366 天）\n/event ID — 查看事件及提醒规则\n/reminders ID — 查看当前提醒规则、来源和触发时间\n/title ID 新标题 — 编辑标题\n/remind ID smtp|telegram|all 15m|1h|off|default — 设置提前量、关闭或恢复继承\n重复日程默认仅修改选中的那一次；/title_series 和 /remind_series 修改整个系列（已有单次提醒覆盖仍优先）。\nID 来自日程列表，有效期 24 小时。标题最多 200 字。SMTP 等渠道仍需在服务端启用。\n/help — 使用说明\n按服务器配置的时区显示。"
+const help = "日程管理\n/today — 今天的日程（含全天、跨天和已结束日程）\n/next [N] — 从现在起最近 N 个日程，默认 5 条，N 为 1–20（含进行中日程，查询未来 366 天）\n/event ID — 查看事件及提醒规则\n/reminders ID — 查看当前提醒规则、来源和触发时间\n/title ID 新标题 — 编辑标题\n/remind ID smtp|telegram|all 15m|1h|off|default — 设置提前量、关闭或恢复继承\n重复日程默认仅修改选中的那一次；/title_series 和 /remind_series 修改整个系列（已有单次提醒覆盖仍优先）。\nID 来自日程列表，有效期 24 小时。标题最多 200 字。SMTP 等渠道仍需在服务端启用。\n/help — 使用说明\n按服务器配置的时区显示。"
 
 func (b *Bot) reply(ctx context.Context, u Update) []string {
 	m := u.Message
@@ -170,7 +170,20 @@ func (b *Bot) reply(ctx context.Context, u Update) []string {
 	if command == "/event" || command == "/reminders" || command == "/title" || command == "/title_series" || command == "/remind" || command == "/remind_series" {
 		return b.editReply(ctx, command, fields[1:])
 	}
-	if len(fields) != 1 {
+	limit := 5
+	if command == "/next" {
+		const usage = "用法：/next [N]，N 必须为 1–20 的整数，不填默认 5 条。"
+		if len(fields) > 2 {
+			return []string{usage}
+		}
+		if len(fields) == 2 {
+			n, err := strconv.Atoi(fields[1])
+			if err != nil || n < 1 || n > 20 {
+				return []string{usage}
+			}
+			limit = n
+		}
+	} else if len(fields) != 1 {
 		return nil
 	}
 	switch command {
@@ -185,8 +198,8 @@ func (b *Bot) reply(ctx context.Context, u Update) []string {
 		return []string{"时区配置错误，请联系管理员。"}
 	}
 	now := b.Now().In(loc)
-	from, to, limit := now, now.AddDate(0, 0, 366), 5
-	heading := "最近 5 个日程（含进行中，未来 366 天）"
+	from, to := now, now.AddDate(0, 0, 366)
+	heading := fmt.Sprintf("最近 %d 个日程（含进行中，未来 366 天）", limit)
 	if command == "/today" || command == "今日日程" || command == "今天的日程" {
 		from = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
 		to = from.AddDate(0, 0, 1)
@@ -198,6 +211,9 @@ func (b *Bot) reply(ctx context.Context, u Update) []string {
 	events, err := b.Agenda.Agenda(queryCtx, from, to, limit)
 	if err != nil {
 		return []string{"日程查询失败：日历服务暂不可用、日程数据不受支持或超出查询上限。请稍后重试。"}
+	}
+	if len(events) > limit {
+		events = events[:limit]
 	}
 	lines := []string{heading, "时区：" + b.Config.Timezone}
 	if len(events) == 0 {
