@@ -166,7 +166,7 @@ func (b *Bot) reply(ctx context.Context, u Update) []string {
 		}
 		command = base
 	}
-	if command == "/event" || command == "/reminders" || command == "/title" || command == "/title_series" || command == "/remind" || command == "/remind_series" {
+	if command == "/event" || command == "/title" || command == "/title_series" || command == "/remind" || command == "/remind_series" {
 		return b.editReply(ctx, command, fields[1:])
 	}
 	limit := 5

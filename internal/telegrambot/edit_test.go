@@ -123,25 +123,26 @@ func TestEventEditAuthorizationAndStaleSelections(t *testing.T) {
 	}
 }
 
-func TestEventQueryAndCompatibilityAliasAreReadOnly(t *testing.T) {
+func TestEventQueryIsReadOnlyAndLegacyCommandIsRemoved(t *testing.T) {
 	b, e, id := selectedBot(t)
 	text := strings.Join(b.reply(context.Background(), update(2, "/event@test_bot "+id, "private", 123)), "\n")
-	alias := strings.Join(b.reply(context.Background(), update(3, "/reminders@test_bot "+id, "private", 123)), "\n")
-	if text != alias {
-		t.Fatal("legacy query alias differs from /event", text, alias)
+	for _, command := range []string{"/reminders", "/reminders " + id, "/reminders@test_bot " + id} {
+		if reply := b.reply(context.Background(), update(3, command, "private", 123)); len(reply) != 0 {
+			t.Fatal("removed command is still handled", command, reply)
+		}
 	}
-	if e.calls != 2 || e.writeCalls != 0 || !strings.Contains(text, "事件及提醒规则") || !strings.Contains(text, "smtp：提前 30m") || !strings.Contains(text, "telegram：关闭") || !strings.Contains(text, "不会发送") {
+	if e.calls != 1 || e.writeCalls != 0 || !strings.Contains(text, "事件及提醒规则") || !strings.Contains(text, "smtp：提前 30m") || !strings.Contains(text, "telegram：关闭") || !strings.Contains(text, "不会发送") {
 		t.Fatal(e, text)
 	}
 	if e.ref.Instance == "" {
 		t.Fatal("lost occurrence scope")
 	}
-	for _, u := range []Update{update(3, "/reminders "+id, "private", 999), update(4, "/reminders "+id, "group", 123), update(5, "/reminders@other_bot "+id, "private", 123)} {
+	for _, u := range []Update{update(3, "/event "+id, "private", 999), update(4, "/event "+id, "group", 123), update(5, "/event@other_bot "+id, "private", 123)} {
 		if reply := b.reply(context.Background(), u); len(reply) != 0 {
 			t.Fatal("unauthorized reminder lookup", reply)
 		}
 	}
-	if e.calls != 2 || e.writeCalls != 0 {
+	if e.calls != 1 || e.writeCalls != 0 {
 		t.Fatal("unauthorized request reached editor", e)
 	}
 	if strings.Contains(help, "/reminders") || !strings.Contains(help, "/event ID") {

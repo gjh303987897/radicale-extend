@@ -81,7 +81,7 @@ func (b *Bot) editReply(ctx context.Context, command string, args []string) []st
 		scope = "仅本次重复实例"
 	}
 	switch command {
-	case "/event", "/reminders":
+	case "/event":
 		if len(args) != 1 {
 			return []string{"用法：/event ID"}
 		}
