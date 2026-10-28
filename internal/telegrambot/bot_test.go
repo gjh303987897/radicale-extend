@@ -201,7 +201,7 @@ func TestSetupMenuWebhookAndRedaction(t *testing.T) {
 				Commands []any
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
-			if body.Scope.Type != "chat" || body.Scope.ChatID != 123 || len(body.Commands) != 3 {
+			if body.Scope.Type != "chat" || body.Scope.ChatID != 123 || len(body.Commands) != 9 {
 				t.Error("invalid menu scope", body)
 			}
 			menu = true

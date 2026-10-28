@@ -200,7 +200,105 @@ func TestNativeRadicaleMCPAndNotifications(t *testing.T) {
 	if err != nil || len(agenda) != 3 || agenda[0].Summary != "Native integration" || agenda[1].Summary != "Series" || agenda[2].Summary != "Single exception" {
 		t.Fatal("agenda recurrence, ordering or excluded instance incorrect", agenda, err)
 	}
+	// Bot edits use the same selected instance, keep client properties/alarms,
+	// and reject stale selections rather than overwriting another DAV client.
+	selected := agenda[2]
+	ref := store.EventReference{Resource: selected.Resource, Collection: selected.Calendar, UID: selected.UID, Instance: selected.Instance, ETag: selected.ETag}
+	objForBot, err := s.DAV.Get(ctx, ref.Resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preserved := strings.Replace(objForBot.Data, "END:VEVENT", "X-CLIENT:keep\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT10M\r\nEND:VALARM\r\nEND:VEVENT", 1)
+	objForBot, err = s.DAV.Put(ctx, ref.Resource, preserved, objForBot.ETag, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref.ETag = objForBot.ETag
+	cfg.SMTP.Enabled = false
+	disabledDetails, ruleErr := s.SetEventReminder(ctx, ref, "smtp", "before", 1800, false)
+	if ruleErr != nil || disabledDetails.Rules[0].Enabled {
+		t.Fatal("disabled SMTP was enabled by Bot rule", disabledDetails, ruleErr)
+	}
+	cfg.SMTP.Enabled = true
+	if _, err = s.SetEventReminder(ctx, ref, "telegram", "off", 0, false); err != nil {
+		t.Fatal(err)
+	}
+	jobsForBot, err := s.Store.ListJobs(ref.Resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	countSMTP := 0
+	for _, job := range jobsForBot {
+		if job.Kind != "reminder" || job.State != "pending" || job.Instance != ref.Instance {
+			continue
+		}
+		if job.Channel == "telegram" {
+			t.Fatal("disabled Telegram occurrence was scheduled")
+		}
+		if job.Channel == "smtp" {
+			countSMTP++
+			at, _ := time.Parse(time.RFC3339, ref.Instance)
+			if job.At != at.Add(-30*time.Minute).Unix() {
+				t.Fatal(job)
+			}
+		}
+	}
+	if countSMTP != 1 {
+		t.Fatal("SMTP rule did not create the selected instance reminder", countSMTP)
+	}
+	newETag, err := s.EditEventTitle(ctx, ref, "Bot instance title", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.EditEventTitle(ctx, ref, "stale overwrite", false); err != service.ErrEventChanged {
+		t.Fatal("stale Bot title selection accepted", err)
+	}
+	ref.ETag = newETag
+	objForBot, err = s.DAV.Get(ctx, ref.Resource)
+	if err != nil || !strings.Contains(objForBot.Data, "X-CLIENT:keep") || !strings.Contains(objForBot.Data, "BEGIN:VALARM") {
+		t.Fatal("Bot title edit dropped client properties", err)
+	}
+	call("get_event", map[string]any{"resource": ref.Resource, "recurrence_id": secondID}, &instance)
+	if instance.Item.Summary != "Bot instance title" {
+		t.Fatal("Bot changed the wrong occurrence", instance)
+	}
+	call("get_event", map[string]any{"resource": ref.Resource}, &series)
+	if series.Item.Summary != "Series" {
+		t.Fatal("single Bot title edit changed series master")
+	}
+	// A whole-series title edit intentionally includes exception summaries.
+	newETag, err = s.EditEventTitle(ctx, ref, "Bot entire series", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref.ETag = newETag
+	call("get_event", map[string]any{"resource": ref.Resource, "recurrence_id": secondID}, &instance)
+	call("get_event", map[string]any{"resource": ref.Resource}, &series)
+	if instance.Item.Summary != "Bot entire series" || series.Item.Summary != "Bot entire series" {
+		t.Fatal("whole series edit omitted exception")
+	}
+	if _, err = s.SetEventReminder(ctx, ref, "all", "default", 0, false); err != nil {
+		t.Fatal(err)
+	}
+	if rules, err := s.Store.ReminderRules(ref.Collection, ref.UID); err != nil || len(rules) != 0 {
+		t.Fatal("default did not clear channel overrides", rules, err)
+	}
 	call("delete_event", map[string]any{"resource": series.Resource, "etag": series.ETag}, nil)
+	// All-day recurrence IDs use dates, not UTC timestamps.
+	day := now.AddDate(0, 0, 3).Format("2006-01-02")
+	dayEnd := now.AddDate(0, 0, 4).Format("2006-01-02")
+	var dayEvent mcpapi.Result
+	call("create_event", map[string]any{"calendar": "/alice/work/", "fields": map[string]any{"summary": "All day", "all_day": true, "start": day, "end": dayEnd, "rrule": "FREQ=DAILY;COUNT=2"}}, &dayEvent)
+	dayRef := store.EventReference{Resource: dayEvent.Resource, Collection: "/alice/work/", UID: dayEvent.Item.UID, Instance: day, ETag: dayEvent.ETag}
+	dayETag, err := s.EditEventTitle(ctx, dayRef, "All-day instance", false)
+	if err != nil {
+		t.Fatal("all-day title edit", err)
+	}
+	call("get_event", map[string]any{"resource": dayEvent.Resource, "recurrence_id": day}, &instance)
+	if instance.Item.Summary != "All-day instance" || !instance.Item.AllDay {
+		t.Fatal("all-day edit lost date semantics", instance)
+	}
+	call("delete_event", map[string]any{"resource": dayEvent.Resource, "etag": dayETag}, nil)
 	if err = s.Sync(ctx, false); err != nil {
 		t.Fatal(err)
 	}

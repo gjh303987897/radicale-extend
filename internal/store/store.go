@@ -68,6 +68,8 @@ func (s *Store) migrate() error {
  CREATE TABLE IF NOT EXISTS telegram_offsets(scope TEXT PRIMARY KEY,offset INTEGER NOT NULL);
  CREATE TABLE IF NOT EXISTS telegram_replies(scope TEXT NOT NULL,update_id INTEGER NOT NULL,part INTEGER NOT NULL,body TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,due INTEGER NOT NULL,PRIMARY KEY(scope,update_id,part));
  CREATE INDEX IF NOT EXISTS telegram_replies_due ON telegram_replies(scope,state,due);
+ CREATE TABLE IF NOT EXISTS channel_reminders(collection TEXT NOT NULL,uid TEXT NOT NULL,instance TEXT NOT NULL,channel TEXT NOT NULL,mode TEXT NOT NULL,before_seconds INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(collection,uid,instance,channel));
+ CREATE TABLE IF NOT EXISTS telegram_event_refs(scope TEXT NOT NULL,id TEXT NOT NULL,resource TEXT NOT NULL,collection TEXT NOT NULL,uid TEXT NOT NULL,instance TEXT NOT NULL,etag TEXT NOT NULL,expires INTEGER NOT NULL,PRIMARY KEY(scope,id));
  `}} {
 		var version int
 		if err := entry.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
@@ -151,11 +153,29 @@ func SaveJob(tx *sql.Tx, j Job) error {
 	return err
 }
 func (s *Store) Apply(r Resource, jobs []Job, changed bool, remove bool) error {
+	return s.ApplyReminderRules(r, jobs, changed, remove, nil)
+}
+
+// ApplyReminderRules commits overrides and their replacement jobs together.
+func (s *Store) ApplyReminderRules(r Resource, jobs []Job, changed bool, remove bool, rules []ReminderRule) error {
 	tx, err := s.DB.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	for _, rule := range rules {
+		if rule.Collection != r.Collection || rule.UID != r.UID {
+			return errors.New("reminder rule resource mismatch")
+		}
+		if rule.Mode == "" {
+			_, err = tx.Exec("DELETE FROM channel_reminders WHERE collection=? AND uid=? AND instance=? AND channel=?", rule.Collection, rule.UID, rule.Instance, rule.Channel)
+		} else {
+			_, err = tx.Exec("INSERT INTO channel_reminders(collection,uid,instance,channel,mode,before_seconds) VALUES(?,?,?,?,?,?) ON CONFLICT(collection,uid,instance,channel) DO UPDATE SET mode=excluded.mode,before_seconds=excluded.before_seconds", rule.Collection, rule.UID, rule.Instance, rule.Channel, rule.Mode, rule.BeforeSeconds)
+		}
+		if err != nil {
+			return err
+		}
+	}
 	valid := map[string]bool{}
 	for _, j := range jobs {
 		if j.Kind == "reminder" {

@@ -10,9 +10,10 @@ import (
 )
 
 type AgendaEvent struct {
-	Start, End                  time.Time
-	Summary, Location, Calendar string
-	AllDay, Hidden              bool
+	Start, End                    time.Time
+	Summary, Location, Calendar   string
+	AllDay, Hidden                bool
+	Resource, ETag, UID, Instance string
 }
 
 // Agenda queries the authoritative DAV service instead of serving a stale
@@ -50,6 +51,11 @@ func (s *Service) Agenda(ctx context.Context, from, to time.Time, limit int) ([]
 			if calendar.Kind(cal) != "VEVENT" {
 				continue
 			}
+			master, err := calendar.Master(cal, "VEVENT")
+			if err != nil {
+				return nil, err
+			}
+			recurring := master.Props.Get("RRULE") != nil || master.Props.Get("RDATE") != nil
 			instances, err := calendar.ExpandOverlapping(cal, from, to, loc, s.Config.Reminder.MaxInstances)
 			if err != nil {
 				return nil, errors.New("agenda contains unsupported calendar data")
@@ -60,7 +66,11 @@ func (s *Service) Agenda(ctx context.Context, from, to time.Time, limit int) ([]
 					return nil, errors.New("agenda instance limit exceeded")
 				}
 				v := in.View
-				out = append(out, AgendaEvent{Start: in.Start, End: in.End, Summary: v.Summary, Location: v.Location, Calendar: col.Path, AllDay: v.AllDay, Hidden: s.Config.Rule(col.Path).HideDetails})
+				instance := ""
+				if recurring {
+					instance = in.Key
+				}
+				out = append(out, AgendaEvent{Start: in.Start, End: in.End, Summary: v.Summary, Location: v.Location, Calendar: col.Path, AllDay: v.AllDay, Hidden: s.Config.Rule(col.Path).HideDetails, Resource: obj.Path, ETag: obj.ETag, UID: v.UID, Instance: instance})
 			}
 		}
 	}

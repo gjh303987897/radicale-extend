@@ -97,6 +97,10 @@ func (s *Service) Override(col, uid string) (calendar.Override, error) {
 	return r, err
 }
 func (s *Service) project(o dav.Object, col string, baseline bool) error {
+	return s.projectReminderRules(o, col, baseline, nil)
+}
+
+func (s *Service) projectReminderRules(o dav.Object, col string, baseline bool, updates []store.ReminderRule) error {
 	old, err := s.Store.Resource(o.Path)
 	exists := err == nil
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -115,6 +119,11 @@ func (s *Service) project(o dav.Object, col string, baseline bool) error {
 		return err
 	}
 	uid := calendar.Text(master, "UID")
+	channelRules, err := s.Store.ReminderRules(col, uid)
+	if err != nil {
+		return err
+	}
+	channelRules = mergeReminderRules(channelRules, updates)
 	r := store.Resource{Path: o.Path, Collection: col, UID: uid, ETag: o.ETag, Data: o.Data, Revision: Revision(o.Data), Semantic: semantic(cal)}
 	changed := !baseline && (!exists || old.Semantic != r.Semantic)
 	now := s.Now()
@@ -130,6 +139,11 @@ func (s *Service) project(o dav.Object, col string, baseline bool) error {
 		advance := s.Config.Reminder.DefaultBefore.Value()
 		if override.Mode == "before" {
 			advance = time.Duration(override.BeforeSeconds) * time.Second
+		}
+		for _, r := range channelRules {
+			if r.Mode == "before" && time.Duration(r.BeforeSeconds)*time.Second > advance {
+				advance = time.Duration(r.BeforeSeconds) * time.Second
+			}
 		}
 		for _, component := range cal.Children {
 			for _, alarm := range component.Children {
@@ -161,16 +175,16 @@ func (s *Service) project(o dav.Object, col string, baseline bool) error {
 			r.Error = e.Error()
 		} else {
 			for _, in := range instances {
-				alarms, e := calendar.Alarms(in, s.Config, override)
-				if e != nil {
-					r.Error = e.Error()
-					break
-				}
-				for _, a := range alarms {
-					if a.At.Before(now.Add(-s.Config.Reminder.Grace.Value())) || !a.At.Before(horizon) {
-						continue
+				for _, ch := range s.Config.Channels(col) {
+					alarms, e := calendar.Alarms(in, s.Config, effectiveReminder(channelRules, in.Key, ch, override))
+					if e != nil {
+						r.Error = e.Error()
+						break
 					}
-					for _, ch := range s.Config.Channels(col) {
+					for _, a := range alarms {
+						if a.At.Before(now.Add(-s.Config.Reminder.Grace.Value())) || !a.At.Before(horizon) {
+							continue
+						}
 						title, body := s.render("日程提醒", in.View, col, rule.HideDetails)
 						if kind == "VTODO" {
 							title, body = s.render("待办提醒", in.View, col, rule.HideDetails)
@@ -178,6 +192,9 @@ func (s *Service) project(o dav.Object, col string, baseline bool) error {
 						due := s.Config.QuietUntil(a.At)
 						jobs = append(jobs, store.Job{ID: Hash("reminder", col, uid, in.Key, a.Key, ch, a.At.UTC().Format(time.RFC3339)), Resource: o.Path, Collection: col, UID: uid, Instance: in.Key, Kind: "reminder", Channel: ch, Source: a.Key, Revision: r.Revision, At: a.At.Unix(), Due: due.Unix(), Expires: a.At.Add(s.Config.Reminder.Grace.Value()).Unix(), Title: title, Body: body})
 					}
+				}
+				if r.Error != "" {
+					break
 				}
 			}
 		}
@@ -199,7 +216,10 @@ func (s *Service) project(o dav.Object, col string, baseline bool) error {
 			}
 		}
 	}
-	return s.Store.Apply(r, jobs, changed, false)
+	if len(updates) > 0 && r.Error != "" {
+		return errors.New("cannot apply reminder rules to unsupported calendar data")
+	}
+	return s.Store.ApplyReminderRules(r, jobs, changed, false, updates)
 }
 func (s *Service) render(action string, v calendar.View, col string, hidden bool) (string, string) {
 	if hidden {

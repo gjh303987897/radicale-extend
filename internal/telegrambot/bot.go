@@ -27,10 +27,17 @@ type Agenda interface {
 	Agenda(context.Context, time.Time, time.Time, int) ([]service.AgendaEvent, error)
 }
 
+type EventEditor interface {
+	EventRules(context.Context, store.EventReference) (service.EventDetails, error)
+	SetEventReminder(context.Context, store.EventReference, string, string, int64, bool) (service.EventDetails, error)
+	EditEventTitle(context.Context, store.EventReference, string, bool) (string, error)
+}
+
 type Bot struct {
 	Config          *config.Config
 	Store           *store.Store
 	Agenda          Agenda
+	Editor          EventEditor
 	HTTP            *http.Client
 	Sender          notify.Sender
 	Now             func() time.Time
@@ -38,7 +45,7 @@ type Bot struct {
 }
 
 func New(s *service.Service) *Bot {
-	return &Bot{Config: s.Config, Store: s.Store, Agenda: s, HTTP: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, Sender: notify.New(s.Config), Now: time.Now, scope: service.Hash("telegram-commands", s.Config.Telegram.Token.Value, s.Config.Telegram.ChatID)}
+	return &Bot{Config: s.Config, Store: s.Store, Agenda: s, Editor: s, HTTP: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, Sender: notify.New(s.Config), Now: time.Now, scope: service.Hash("telegram-commands", s.Config.Telegram.Token.Value, s.Config.Telegram.ChatID)}
 }
 
 func (b *Bot) call(ctx context.Context, method string, args any, result any) error {
@@ -111,6 +118,12 @@ func (b *Bot) setup(ctx context.Context) error {
 		"commands": []map[string]string{
 			{"command": "today", "description": "列出今天的日程"},
 			{"command": "next", "description": "列出最近 5 个日程"},
+			{"command": "event", "description": "查看事件与提醒规则：/event ID"},
+			{"command": "reminders", "description": "查看当前提醒规则：/reminders ID"},
+			{"command": "title", "description": "编辑选中事件标题：/title ID 新标题"},
+			{"command": "remind", "description": "设置提醒：/remind ID smtp|telegram|all 15m|off|default"},
+			{"command": "title_series", "description": "编辑整个重复系列标题"},
+			{"command": "remind_series", "description": "设置整个重复系列的渠道提醒规则"},
 			{"command": "help", "description": "查看使用说明"},
 		},
 	}, nil)
@@ -132,7 +145,7 @@ type Update struct {
 	} `json:"message"`
 }
 
-const help = "日程查询\n/today — 今天的日程（含全天、跨天和已结束日程）\n/next — 从现在起最近 5 个日程（含进行中日程，查询未来 366 天）\n/help — 使用说明\n按服务器配置的时区显示。"
+const help = "日程管理\n/today — 今天的日程（含全天、跨天和已结束日程）\n/next — 从现在起最近 5 个日程（含进行中日程，查询未来 366 天）\n/event ID — 查看事件及提醒规则\n/reminders ID — 查看当前提醒规则、来源和触发时间\n/title ID 新标题 — 编辑标题\n/remind ID smtp|telegram|all 15m|1h|off|default — 设置提前量、关闭或恢复继承\n重复日程默认仅修改选中的那一次；/title_series 和 /remind_series 修改整个系列（已有单次提醒覆盖仍优先）。\nID 来自日程列表，有效期 24 小时。标题最多 200 字。SMTP 等渠道仍需在服务端启用。\n/help — 使用说明\n按服务器配置的时区显示。"
 
 func (b *Bot) reply(ctx context.Context, u Update) []string {
 	m := u.Message
@@ -144,7 +157,7 @@ func (b *Bot) reply(ctx context.Context, u Update) []string {
 		return nil
 	}
 	fields := strings.Fields(m.Text)
-	if len(fields) != 1 {
+	if len(fields) == 0 {
 		return nil
 	}
 	command := fields[0]
@@ -153,6 +166,12 @@ func (b *Bot) reply(ctx context.Context, u Update) []string {
 			return nil
 		}
 		command = base
+	}
+	if command == "/event" || command == "/reminders" || command == "/title" || command == "/title_series" || command == "/remind" || command == "/remind_series" {
+		return b.editReply(ctx, command, fields[1:])
+	}
+	if len(fields) != 1 {
+		return nil
 	}
 	switch command {
 	case "/start", "/help":
@@ -188,6 +207,21 @@ func (b *Bot) reply(ctx context.Context, u Update) []string {
 	if truncated {
 		events = events[:100]
 	}
+	refs := make([]store.EventReference, 0, len(events))
+	ids := make([]string, len(events))
+	for i, e := range events {
+		if e.Resource == "" || e.UID == "" || e.ETag == "" {
+			continue
+		}
+		id := service.Hash(b.scope, e.Calendar, e.UID, e.Instance)[:20]
+		ids[i] = id
+		refs = append(refs, store.EventReference{ID: id, Resource: e.Resource, Collection: e.Calendar, UID: e.UID, Instance: e.Instance, ETag: e.ETag, Expires: b.Now().Add(24 * time.Hour).Unix()})
+	}
+	if len(refs) > 0 {
+		if err = b.Store.SaveEventReferences(ctx, b.scope, refs, b.Now()); err != nil {
+			return []string{"暂时无法保存事件 ID，请稍后重试。"}
+		}
+	}
 	for i, e := range events {
 		label := clean(e.Summary, 160)
 		if label == "" {
@@ -208,12 +242,22 @@ func (b *Bot) reply(ctx context.Context, u Update) []string {
 			}
 		}
 		lines = append(lines, fmt.Sprintf("\n%d. %s\n%s", i+1, label, when))
+		if ids[i] != "" {
+			scope := "事件"
+			if e.Instance != "" {
+				scope = "重复系列的本次实例"
+			}
+			lines = append(lines, "ID："+ids[i]+"（"+scope+"）")
+		}
 		if !e.Hidden && e.Location != "" {
 			lines = append(lines, "地点："+clean(e.Location, 120))
 		}
 	}
 	if truncated {
 		lines = append(lines, "\n日程较多，仅展示最早的 100 个。")
+	}
+	if len(refs) > 0 {
+		lines = append(lines, "\n查看规则：/reminders ID\n改标题：/title ID 新标题\n设提醒：/remind ID telegram 15m")
 	}
 	return pages(lines)
 }
