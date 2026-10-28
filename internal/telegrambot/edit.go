@@ -83,13 +83,13 @@ func (b *Bot) editReply(ctx context.Context, command string, args []string) []st
 	switch command {
 	case "/event", "/reminders":
 		if len(args) != 1 {
-			return []string{"用法：" + command + " ID"}
+			return []string{"用法：/event ID"}
 		}
 		details, err := b.Editor.EventRules(ctx, ref)
 		if err != nil {
 			return editError(err)
 		}
-		return pages(append([]string{"当前提醒规则", "ID：" + ref.ID, "查询范围：" + scope}, ruleLines(details)...))
+		return pages(append([]string{"事件及提醒规则", "ID：" + ref.ID, "查询范围：" + scope}, ruleLines(details)...))
 	case "/title", "/title_series":
 		if len(args) < 2 {
 			return []string{"用法：/title ID 新标题；整个系列用 /title_series ID 新标题"}

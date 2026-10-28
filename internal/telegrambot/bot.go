@@ -118,10 +118,9 @@ func (b *Bot) setup(ctx context.Context) error {
 		"commands": []map[string]string{
 			{"command": "today", "description": "列出今天的日程"},
 			{"command": "next", "description": "列出最近日程：/next [N]，默认 5 条，最多 20 条"},
-			{"command": "event", "description": "查看事件与提醒规则：/event ID"},
-			{"command": "reminders", "description": "查看当前提醒规则：/reminders ID"},
+			{"command": "event", "description": "查看事件及提醒规则：/event ID"},
 			{"command": "title", "description": "编辑选中事件标题：/title ID 新标题"},
-			{"command": "remind", "description": "设置提醒：/remind ID smtp|telegram|all 15m|off|default"},
+			{"command": "remind", "description": "修改提醒规则：/remind ID smtp|telegram|all 15m|off|default"},
 			{"command": "title_series", "description": "编辑整个重复系列标题"},
 			{"command": "remind_series", "description": "设置整个重复系列的渠道提醒规则"},
 			{"command": "help", "description": "查看使用说明"},
@@ -145,7 +144,7 @@ type Update struct {
 	} `json:"message"`
 }
 
-const help = "日程管理\n/today — 今天的日程（含全天、跨天和已结束日程）\n/next [N] — 从现在起最近 N 个日程，默认 5 条，N 为 1–20（含进行中日程，查询未来 366 天）\n/event ID — 查看事件及提醒规则\n/reminders ID — 查看当前提醒规则、来源和触发时间\n/title ID 新标题 — 编辑标题\n/remind ID smtp|telegram|all 15m|1h|off|default — 设置提前量、关闭或恢复继承\n重复日程默认仅修改选中的那一次；/title_series 和 /remind_series 修改整个系列（已有单次提醒覆盖仍优先）。\nID 来自日程列表，有效期 24 小时。标题最多 200 字。SMTP 等渠道仍需在服务端启用。\n/help — 使用说明\n按服务器配置的时区显示。"
+const help = "日程管理\n/today — 今天的日程（含全天、跨天和已结束日程）\n/next [N] — 从现在起最近 N 个日程，默认 5 条，N 为 1–20（含进行中日程，查询未来 366 天）\n/event ID — 查看事件及提醒规则\n/title ID 新标题 — 编辑标题\n/remind ID smtp|telegram|all 15m|1h|off|default — 修改提醒规则：提前量、关闭或恢复继承\n重复日程默认仅修改选中的那一次；/title_series 和 /remind_series 修改整个系列（已有单次提醒覆盖仍优先）。\nID 来自日程列表，有效期 24 小时。标题最多 200 字。SMTP 等渠道仍需在服务端启用。\n/help — 使用说明\n按服务器配置的时区显示。"
 
 func (b *Bot) reply(ctx context.Context, u Update) []string {
 	m := u.Message
@@ -273,7 +272,7 @@ func (b *Bot) reply(ctx context.Context, u Update) []string {
 		lines = append(lines, "\n日程较多，仅展示最早的 100 个。")
 	}
 	if len(refs) > 0 {
-		lines = append(lines, "\n查看规则：/reminders ID\n改标题：/title ID 新标题\n设提醒：/remind ID telegram 15m")
+		lines = append(lines, "\n查看事件及提醒规则：/event ID\n改标题：/title ID 新标题\n修改提醒规则：/remind ID telegram 15m")
 	}
 	return pages(lines)
 }
