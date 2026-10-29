@@ -130,7 +130,6 @@ type segment struct {
 	event     Event
 	a, b      float64
 	continued bool
-	lane      int
 }
 
 func segments(events []Event, day time.Time, allDay bool) []segment {
@@ -191,82 +190,71 @@ func (p *painter) eventCard(r image.Rectangle, s segment) {
 	if s.continued {
 		title = "续 · " + title
 	}
-	clock := s.event.Start.In(s.event.End.Location()).Format("15:04")
+	startClock := s.event.Start.In(s.event.End.Location()).Format("15:04")
+	clock := startClock
 	if !s.event.End.Equal(s.event.Start) {
 		clock += "–" + s.event.End.Format("15:04")
 	}
-	x, y, w := r.Min.X+10, r.Min.Y, r.Dx()-18
-	if r.Dy() < 42 {
-		p.text(clip, x, y+20, fit(clock+" "+title, p.body, w), p.body, colors.accent)
+	x, y, w := r.Min.X+8, r.Min.Y, r.Dx()-14
+	lines := 1
+	if r.Dy() >= 84 {
+		lines = 2
+	}
+	titles := wrapTitle(title, p.body, w, lines)
+	for i, line := range titles {
+		p.text(clip, x, y+20+i*20, line, p.body, rgb(0x243348))
+	}
+	if r.Dy() < 46 {
 		return
 	}
-	if r.Dy() < 64 {
-		p.text(clip, x, y+19, fit(title, p.body, w), p.body, colors.accent)
-		p.text(clip, x, y+37, fit(clock, p.small, w), p.small, colors.accent)
-		return
+	// Keep titles visible in short, narrow overlap cards. Never show a clipped
+	// time range that could be mistaken for a different end time.
+	if font.MeasureString(p.small, clock).Ceil() > w {
+		clock = startClock
 	}
-	p.text(clip, x, y+19, fit(clock, p.small, w), p.small, colors.accent)
-	p.text(clip, x, y+43, fit(title, p.body, w), p.body, rgb(0x243348))
-	if r.Dy() > 90 && !s.event.Hidden && s.event.Location != "" {
-		p.text(clip, x, y+67, fit(s.event.Location, p.small, w), p.small, rgb(0x687385))
+	clockY := 19 + len(titles)*20
+	if font.MeasureString(p.small, clock).Ceil() <= w {
+		p.text(clip, x, y+clockY, clock, p.small, colors.accent)
+	}
+	if r.Dy() > clockY+32 && !s.event.Hidden && s.event.Location != "" {
+		p.text(clip, x, y+clockY+22, fit(s.event.Location, p.small, w), p.small, rgb(0x687385))
 	}
 }
 
-func (p *painter) timed(ctx context.Context, items []segment, colX, colW, top, bottom, first, last int) (int, error) {
-	unit := float64(bottom-top) / float64((last-first)*60)
-	minMinutes := 28 / unit
-	for i := range items {
-		items[i].b = max(items[i].b, items[i].a+minMinutes)
+func wrapTitle(text string, face font.Face, width, lines int) []string {
+	text = Text(text, 160)
+	result := []string{}
+	for len(result) < lines {
+		line := fit(text, face, width)
+		if line == text || len(result) == lines-1 {
+			return append(result, line)
+		}
+		prefix := strings.TrimSuffix(line, "…")
+		if prefix == "" {
+			return append(result, line)
+		}
+		result = append(result, strings.TrimSpace(prefix))
+		text = strings.TrimSpace(strings.TrimPrefix(text, prefix))
 	}
-	collapsed := 0
-	for begin := 0; begin < len(items); {
+	return result
+}
+
+func (p *painter) timed(ctx context.Context, items []segment, colX, colW, top, bottom, first, last int) (int, error) {
+	cards, collapsed, err := layoutTimed(ctx, items, colX, colW, top, bottom, first, last)
+	if err != nil {
+		return 0, err
+	}
+	for _, card := range cards {
 		if err := ctx.Err(); err != nil {
 			return collapsed, err
 		}
-		end := begin + 1
-		clusterEnd := items[begin].b
-		for end < len(items) && items[end].a < clusterEnd {
-			clusterEnd = max(clusterEnd, items[end].b)
-			end++
+		if card.collapsed == 0 {
+			p.eventCard(card.rect, card.segment)
+			continue
 		}
-		ends := []float64{}
-		for i := begin; i < end; i++ {
-			lane := 0
-			for lane < len(ends) && ends[lane] > items[i].a {
-				lane++
-			}
-			if lane == len(ends) {
-				ends = append(ends, items[i].b)
-			} else {
-				ends[lane] = items[i].b
-			}
-			items[i].lane = lane
-		}
-		lanes := min(len(ends), 5)
-		hidden := 0
-		for i := begin; i < end; i++ {
-			s := items[i]
-			if len(ends) > 5 && s.lane >= 4 {
-				hidden++
-				continue
-			}
-			x := colX + 8 + s.lane*(colW-16)/lanes
-			y := top + int((s.a-float64(first*60))*unit)
-			finish := top + int((s.b-float64(first*60))*unit)
-			y = min(y, bottom-28)
-			finish = min(bottom, max(finish, y+28))
-			p.eventCard(image.Rect(x, y+1, x+(colW-16)/lanes-3, finish-1), s)
-		}
-		if hidden > 0 {
-			x := colX + 8 + 4*(colW-16)/lanes
-			y := min(bottom-32, top+int((items[begin].a-float64(first*60))*unit))
-			r := image.Rect(x, y, x+(colW-16)/lanes-3, min(bottom, y+64))
-			rounded(p.img, r, 8, rgb(0xECEFF4))
-			clip := p.img.SubImage(r).(*image.RGBA)
-			p.text(clip, x+5, y+22, fmt.Sprintf("+%d", hidden), p.body, rgb(0x687385))
-			collapsed += hidden
-		}
-		begin = end
+		rounded(p.img, card.rect, 8, rgb(0xECEFF4))
+		clip := p.img.SubImage(card.rect).(*image.RGBA)
+		p.text(clip, card.rect.Min.X+5, card.rect.Min.Y+22, fmt.Sprintf("+%d", card.collapsed), p.body, rgb(0x687385))
 	}
 	return collapsed, nil
 }
@@ -451,18 +439,20 @@ func Render(ctx context.Context, options Options, events []Event) (Result, error
 			box(p.img, image.Rect(plotX, half, plotX+7*colW, half+1), rgb(0xF0F3F8))
 		}
 	}
+	// Draw the current-time marker beneath cards so it cannot strike through
+	// an event title or time range.
+	if todayIndex >= 0 && generated.Hour() >= first && generated.Hour() < last {
+		y := gridTop + int((float64(generated.Hour())+float64(generated.Minute())/60-float64(first))*unit)
+		x := plotX + todayIndex*colW
+		box(p.img, image.Rect(x, y, x+colW, y+2), rgb(0xEB6767))
+		rounded(p.img, image.Rect(x-4, y-3, x+4, y+5), 4, rgb(0xEB6767))
+	}
 	for d := 0; d < 7; d++ {
 		n, e := p.timed(ctx, timed[d], plotX+d*colW, colW, gridTop, gridBottom, first, last)
 		if e != nil {
 			return Result{}, e
 		}
 		collapsed += n
-	}
-	if todayIndex >= 0 && generated.Hour() >= first && generated.Hour() < last {
-		y := gridTop + int((float64(generated.Hour())+float64(generated.Minute())/60-float64(first))*unit)
-		x := plotX + todayIndex*colW
-		box(p.img, image.Rect(x, y, x+colW, y+2), rgb(0xEB6767))
-		rounded(p.img, image.Rect(x-4, y-3, x+4, y+5), 4, rgb(0xEB6767))
 	}
 	footer := fmt.Sprintf("生成于 %s  ·  同色代表同一日历  ·  时间按本地时区排列", generated.Format("01-02 15:04"))
 	p.text(p.img, 48, 1791, footer, p.body, rgb(0x7A879B))
