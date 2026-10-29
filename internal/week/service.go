@@ -23,15 +23,16 @@ type Source interface {
 	WeeklyAgenda(context.Context, time.Time, time.Time, int) ([]service.AgendaEvent, error)
 }
 type Service struct {
-	Config        *config.Config
-	Store         *store.Store
-	Source        Source
-	Sender        notify.ImageSender
-	Render        func(context.Context, weekimage.Options, []weekimage.Event) (weekimage.Result, error)
-	Now           func() time.Time
-	mu            sync.Mutex
-	lastScheduled string
-	lastClean     time.Time
+	Config         *config.Config
+	Store          *store.Store
+	Source         Source
+	Sender         notify.ImageSender
+	Render         func(context.Context, weekimage.Options, []weekimage.Event) (weekimage.Result, error)
+	Now            func() time.Time
+	mu             sync.Mutex
+	lastScheduled  string
+	lastClean      time.Time
+	lastCheckpoint time.Time
 }
 
 func New(s *service.Service) *Service {
@@ -238,6 +239,12 @@ func (s *Service) dispatch(ctx context.Context) error {
 func (s *Service) Step(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.lastClean.IsZero() || s.Now().Sub(s.lastClean) >= time.Minute {
+		if err := s.Store.CleanWeeks(ctx, s.Now()); err != nil {
+			return err
+		}
+		s.lastClean = s.Now()
+	}
 	if err := s.Schedule(ctx); err != nil {
 		return err
 	}
@@ -251,11 +258,11 @@ func (s *Service) Step(ctx context.Context) error {
 			return err
 		}
 	}
-	if s.lastClean.IsZero() || s.Now().Sub(s.lastClean) >= time.Hour {
-		if err := s.Store.CleanWeeks(ctx, s.Now()); err != nil {
+	if s.lastCheckpoint.IsZero() || s.Now().Sub(s.lastCheckpoint) >= time.Hour {
+		if err := s.Store.CheckpointWeekStorage(ctx, s.Now()); err != nil {
 			return err
 		}
-		s.lastClean = s.Now()
+		s.lastCheckpoint = s.Now()
 	}
 	return nil
 }

@@ -128,7 +128,41 @@ func (s *Store) FinishWeekDelivery(ctx context.Context, d WeekDelivery, state st
 }
 
 func (s *Store) CleanWeeks(ctx context.Context, now time.Time) error {
-	_, err := s.DB.ExecContext(ctx, "DELETE FROM week_requests WHERE created<? AND state NOT IN ('pending','processing') AND NOT EXISTS (SELECT 1 FROM week_deliveries WHERE request_id=week_requests.id AND state IN ('pending','processing'))", now.AddDate(0, 0, -7).Unix())
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Expiry is independent of the next retry time (e.g. a long retry_after).
+	// Never interrupt a live sender/generator lease; it clears its own payload.
+	if _, err = tx.ExecContext(ctx, "UPDATE week_deliveries SET state='expired',lease=0,png=X'' WHERE request_id IN (SELECT id FROM week_requests WHERE expires<=?) AND (state='pending' OR (state='processing' AND lease<=?))", now.Unix(), now.Unix()); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE week_requests SET state='expired',lease=0 WHERE expires<=? AND (state='pending' OR (state='processing' AND lease<=?))", now.Unix(), now.Unix()); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE week_deliveries SET png=X'' WHERE state NOT IN ('pending','processing') AND length(png)>0"); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM week_requests WHERE created<? AND state NOT IN ('pending','processing') AND NOT EXISTS (SELECT 1 FROM week_deliveries WHERE request_id=week_requests.id AND state IN ('pending','processing'))", now.AddDate(0, 0, -7).Unix()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// CheckpointWeekStorage releases the physical WAL file when image traffic is
+// idle. Freed main-database pages are reused by later reports; no heavyweight
+// full-database VACUUM is performed during notification processing.
+func (s *Store) CheckpointWeekStorage(ctx context.Context, now time.Time) error {
+	var active int
+	err := s.DB.QueryRowContext(ctx, "SELECT (SELECT count(*) FROM week_deliveries WHERE state IN ('pending','processing') AND length(png)>0)+(SELECT count(*) FROM week_requests WHERE state='processing' AND lease>?)+(SELECT count(*) FROM jobs WHERE state='processing' AND lease>?)", now.Unix(), now.Unix()).Scan(&active)
+	if err != nil || active > 0 {
+		return err
+	}
+	var busy, log, checkpointed int
+	err = s.DB.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &log, &checkpointed)
+	// Other connections can keep read snapshots. A busy result is normal: the
+	// next hourly pass and SQLite's ordinary checkpoints will retry safely.
 	return err
 }
 

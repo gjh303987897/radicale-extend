@@ -38,6 +38,12 @@ func Open(state, queue string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Large temporary image writes must not leave a permanently oversized WAL
+	// after checkpoints. This is a reset-time target, not a bound during readers.
+	if _, err = db.Exec("PRAGMA journal_size_limit=8388608"); err != nil {
+		db.Close()
+		return nil, err
+	}
 	q, err := open(queue)
 	if err != nil {
 		db.Close()

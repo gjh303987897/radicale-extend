@@ -28,14 +28,19 @@ func (q *source) WeeklyAgenda(_ context.Context, from, to time.Time, _ int) ([]s
 }
 
 type images struct {
-	calls    map[string]int
-	failSMTP bool
+	calls          map[string]int
+	failSMTP       bool
+	retryAfterSMTP time.Duration
 }
 
 func (i *images) SendImage(_ context.Context, j store.Job, _ []byte) error {
 	i.calls[j.Channel]++
 	if j.Channel == "smtp" && i.failSMTP {
-		return &notify.Error{RetryAfter: 30 * time.Second, Message: "temporary"}
+		delay := i.retryAfterSMTP
+		if delay == 0 {
+			delay = 30 * time.Second
+		}
+		return &notify.Error{RetryAfter: delay, Message: "temporary"}
 	}
 	return nil
 }
@@ -111,6 +116,46 @@ func TestManualImageChannelRetriesSurviveRestart(t *testing.T) {
 	s.Store.DB.QueryRow("SELECT sum(length(png)) FROM week_deliveries").Scan(&bytes)
 	if bytes != 0 {
 		t.Fatal("terminal images not cleared", bytes)
+	}
+}
+
+func TestStepExpiresImagesBeforeLongRetryAndAfterRestart(t *testing.T) {
+	for _, mode := range []string{"running", "restart"} {
+		t.Run(mode, func(t *testing.T) {
+			s, _, sender, now := testService(t)
+			ctx := context.Background()
+			s.Config.Weekly.CatchUp = config.Duration(time.Minute)
+			sender.failSMTP = true
+			sender.retryAfterSMTP = 24 * time.Hour
+			if _, err := s.QueueWeek(ctx, "cleanup"); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Step(ctx); err != nil {
+				t.Fatal(err)
+			}
+			*now = now.Add(time.Minute + time.Second)
+			if mode == "restart" {
+				s.Store.Close()
+				db, err := store.Open(s.Config.Storage.State, s.Config.Storage.Queue)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(db.Close)
+				s = &Service{Config: s.Config, Store: db, Source: s.Source, Sender: sender, Now: s.Now, Render: s.Render}
+			}
+			// Expiry must not wait until the remote retry_after, with or without a restart.
+			if err := s.Step(ctx); err != nil {
+				t.Fatal(err)
+			}
+			var state string
+			var size int
+			if err := s.Store.DB.QueryRow("SELECT state,length(png) FROM week_deliveries WHERE channel='smtp'").Scan(&state, &size); err != nil || state != "expired" || size != 0 {
+				t.Fatal(state, size, err)
+			}
+			if sender.calls["smtp"] != 1 || sender.calls["telegram"] != 1 {
+				t.Fatal("expired image resent", sender.calls)
+			}
+		})
 	}
 }
 func TestDailyScheduleTimezoneDedupCatchupAndManualDisabled(t *testing.T) {
