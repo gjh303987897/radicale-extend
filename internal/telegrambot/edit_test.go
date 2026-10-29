@@ -131,7 +131,7 @@ func TestEventQueryIsReadOnlyAndLegacyCommandIsRemoved(t *testing.T) {
 			t.Fatal("removed command is still handled", command, reply)
 		}
 	}
-	if e.calls != 1 || e.writeCalls != 0 || !strings.Contains(text, "事件及提醒规则") || !strings.Contains(text, "smtp：提前 30m") || !strings.Contains(text, "telegram：关闭") || !strings.Contains(text, "不会发送") {
+	if e.calls != 1 || e.writeCalls != 0 || !strings.Contains(text, "事件及提醒规则") || !strings.Contains(text, "邮件：提前 30m") || !strings.Contains(text, "Telegram：关闭") || !strings.Contains(text, "不会发送") || strings.Contains(text, "30m0s") {
 		t.Fatal(e, text)
 	}
 	if e.ref.Instance == "" {

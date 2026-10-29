@@ -19,6 +19,9 @@ type timedCard struct {
 // minimum readable height and bottom-edge adjustment. Calendar times remain
 // unchanged: a five-minute event still shows its actual five-minute range.
 func layoutTimed(ctx context.Context, items []segment, colX, colW, top, bottom, first, last int) ([]timedCard, int, error) {
+	return layoutTimedHeight(ctx, items, colX, colW, top, bottom, first, last, minTimedHeight)
+}
+func layoutTimedHeight(ctx context.Context, items []segment, colX, colW, top, bottom, first, last, minHeight int) ([]timedCard, int, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
@@ -26,7 +29,7 @@ func layoutTimed(ctx context.Context, items []segment, colX, colW, top, bottom, 
 		return nil, 0, errors.New("invalid weekly layout bounds")
 	}
 	unit := float64(bottom-top) / float64((last-first)*60)
-	height := min(minTimedHeight, bottom-top)
+	height := min(minHeight, bottom-top)
 	positions := make([]timedCard, len(items))
 	for i, s := range items {
 		y := top + int((s.a-float64(first*60))*unit)

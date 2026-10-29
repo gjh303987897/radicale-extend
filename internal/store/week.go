@@ -35,9 +35,9 @@ func (s *Store) QueueWeek(ctx context.Context, r WeekRequest) (bool, error) {
 	if exists > 0 {
 		return false, nil
 	}
-	if r.Kind == "manual" {
+	if r.Kind == "manual" || r.Kind == "manual_day" {
 		var recent int
-		if err = tx.QueryRowContext(ctx, "SELECT count(*) FROM week_requests WHERE kind='manual' AND created>? AND created<=?", r.Created-60, r.Created).Scan(&recent); err != nil {
+		if err = tx.QueryRowContext(ctx, "SELECT count(*) FROM week_requests WHERE kind=? AND created>? AND created<=?", r.Kind, r.Created-60, r.Created).Scan(&recent); err != nil {
 			return false, err
 		}
 		if recent > 0 {

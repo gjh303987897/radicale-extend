@@ -1,4 +1,4 @@
-// Package week schedules and delivers rolling seven-day calendar images.
+// Package week schedules and delivers day and rolling seven-day calendar images.
 package week
 
 import (
@@ -52,13 +52,30 @@ func (s *Service) policy() string {
 	return service.Hash(string(data))
 }
 func (s *Service) QueueWeek(ctx context.Context, key string) (bool, error) {
+	return s.queueManual(ctx, key, false)
+}
+
+func (s *Service) QueueDay(ctx context.Context, key string) (bool, error) {
+	return s.queueManual(ctx, key, true)
+}
+
+func (s *Service) queueManual(ctx context.Context, key string, day bool) (bool, error) {
 	if len(s.channels()) == 0 {
 		return false, ErrNoChannels
 	}
 	loc, _ := time.LoadLocation(s.Config.Timezone)
 	now := s.Now()
 	date := now.In(loc).Format("2006-01-02")
-	return s.Store.QueueWeek(ctx, store.WeekRequest{ID: service.Hash("week-manual", key), StartDate: date, Kind: "manual", Created: now.Unix(), Due: now.Unix(), Expires: now.Add(s.Config.Weekly.CatchUp.Value()).Unix()})
+	kind, prefix, expires := "manual", "week-manual", now.Add(s.Config.Weekly.CatchUp.Value())
+	if day {
+		kind, prefix = "manual_day", "day-manual"
+		local := now.In(loc)
+		midnight := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, 1)
+		if midnight.Before(expires) {
+			expires = midnight
+		}
+	}
+	return s.Store.QueueWeek(ctx, store.WeekRequest{ID: service.Hash(prefix, key), StartDate: date, Kind: kind, Created: now.Unix(), Due: now.Unix(), Expires: expires.Unix()})
 }
 
 func (s *Service) Schedule(ctx context.Context) error {
@@ -128,9 +145,18 @@ func (s *Service) generate(ctx context.Context) error {
 	defer cancel()
 	loc, _ := time.LoadLocation(s.Config.Timezone)
 	start, err := time.ParseInLocation("2006-01-02", request.StartDate, loc)
+	days := 7
+	if request.Kind == "manual_day" {
+		days = 1
+		// A timezone change or clock correction must not turn a queued day
+		// request into a picture of yesterday or tomorrow.
+		if request.StartDate != now.In(loc).Format("2006-01-02") {
+			return finish("expired", nil)
+		}
+	}
 	var agenda []service.AgendaEvent
 	if err == nil {
-		agenda, err = s.Source.WeeklyAgenda(queryCtx, start, start.AddDate(0, 0, 7), s.Config.Weekly.MaxEvents+1)
+		agenda, err = s.Source.WeeklyAgenda(queryCtx, start, start.AddDate(0, 0, days), s.Config.Weekly.MaxEvents+1)
 	}
 	deliveries := []store.WeekDelivery{}
 	cache := map[string]weekimage.Result{}
@@ -163,13 +189,16 @@ func (s *Service) generate(ctx context.Context) error {
 			key := service.Hash(string(data))
 			image, ok := cache[key]
 			if !ok {
-				image, err = s.Render(queryCtx, weekimage.Options{Start: start, Generated: now, FontFile: s.Config.Weekly.FontFile, FontIndex: s.Config.Weekly.FontIndex, Truncated: truncated}, events)
+				image, err = s.Render(queryCtx, weekimage.Options{Start: start, Generated: now, FontFile: s.Config.Weekly.FontFile, FontIndex: s.Config.Weekly.FontIndex, Truncated: truncated, Days: days}, events)
 				if err != nil {
 					break
 				}
 				cache[key] = image
 			}
 			title := fmt.Sprintf("未来七天日程 · %s — %s", start.Format("01/02"), start.AddDate(0, 0, 6).Format("01/02"))
+			if days == 1 {
+				title = "今日日程 · " + start.Format("01/02")
+			}
 			caption := fmt.Sprintf("%s 时区 · %d 项日程 · 生成于 %s", s.Config.Timezone, image.Events, now.In(loc).Format("01-02 15:04"))
 			if image.Collapsed > 0 || truncated {
 				caption += "；密集或超量日程已在图中标注。"

@@ -23,16 +23,27 @@ import (
 	"radicale-extend/internal/service"
 	"radicale-extend/internal/store"
 	"radicale-extend/internal/week"
+	"radicale-extend/internal/weekimage"
 )
 
 type capture struct{ jobs []store.Job }
 
 func (c *capture) Send(_ context.Context, j store.Job) error { c.jobs = append(c.jobs, j); return nil }
 
-type captureImages struct{ channels map[string]int }
+type captureImages struct{ channels, dayChannels map[string]int }
 
 func (c *captureImages) SendImage(_ context.Context, j store.Job, data []byte) error {
 	image, err := png.DecodeConfig(bytes.NewReader(data))
+	if strings.HasPrefix(j.Title, "今日日程") {
+		if err != nil || image.Width != weekimage.DayWidth || image.Height != weekimage.DayHeight {
+			return fmt.Errorf("invalid day image")
+		}
+		if c.dayChannels == nil {
+			c.dayChannels = map[string]int{}
+		}
+		c.dayChannels[j.Channel]++
+		return nil
+	}
 	if err != nil || image.Width < 1000 {
 		return fmt.Errorf("invalid weekly image")
 	}
@@ -206,6 +217,15 @@ func TestNativeRadicaleMCPAndNotifications(t *testing.T) {
 	if imageSink.channels["smtp"] != 1 || imageSink.channels["telegram"] != 1 {
 		t.Fatal("weekly dual-channel delivery missing", imageSink.channels)
 	}
+	if _, err = weekly.QueueDay(ctx, "native-day-image"); err != nil {
+		t.Fatal(err)
+	}
+	if err = weekly.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if imageSink.dayChannels["smtp"] != 1 || imageSink.dayChannels["telegram"] != 1 {
+		t.Fatal("day dual-channel delivery missing", imageSink.dayChannels)
+	}
 	// Exercise task completion and undated task search through real MCP + DAV.
 	var task mcpapi.Result
 	call("create_task", map[string]any{"calendar": "/alice/work/", "fields": map[string]any{"summary": "Undated task"}}, &task)
@@ -373,6 +393,9 @@ func TestNativeRadicaleMCPAndNotifications(t *testing.T) {
 	}
 	if imageSink.channels["smtp"] != 1 || imageSink.channels["telegram"] != 1 {
 		t.Fatal("restart duplicated weekly image", imageSink.channels)
+	}
+	if imageSink.dayChannels["smtp"] != 1 || imageSink.dayChannels["telegram"] != 1 {
+		t.Fatal("restart duplicated day image", imageSink.dayChannels)
 	}
 	if err = s.Sync(ctx, true); err != nil {
 		t.Fatal(err)

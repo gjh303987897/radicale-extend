@@ -62,7 +62,7 @@ func (c *Channels) sendPhoto(ctx context.Context, j store.Job, picture []byte) e
 		}
 		if err == nil {
 			var part io.Writer
-			part, err = form.CreatePart(textproto.MIMEHeader{"Content-Disposition": {`form-data; name="photo"; filename="week.png"`}, "Content-Type": {"image/png"}})
+			part, err = form.CreatePart(textproto.MIMEHeader{"Content-Disposition": {`form-data; name="photo"; filename="calendar.png"`}, "Content-Type": {"image/png"}})
 			if err == nil {
 				_, err = part.Write(picture)
 			}
@@ -112,7 +112,7 @@ func writeImageMail(out io.Writer, j store.Job, from, to string, picture []byte)
 	}
 	var alternative bytes.Buffer
 	alt := multipart.NewWriter(&alternative)
-	for _, body := range []struct{ kind, text string }{{"text/plain", j.Body + "\n\n未来七天日程见附图。"}, {"text/html", "<html><body><h2>" + html.EscapeString(j.Title) + "</h2><p>" + html.EscapeString(j.Body) + "</p><img src=\"cid:week-image\" alt=\"未来七天日程\" style=\"max-width:100%;height:auto\"></body></html>"}} {
+	for _, body := range []struct{ kind, text string }{{"text/plain", j.Body + "\n\n日程见附图。"}, {"text/html", "<html><body><h2>" + html.EscapeString(j.Title) + "</h2><p>" + html.EscapeString(j.Body) + "</p><img src=\"cid:week-image\" alt=\"日程图\" style=\"max-width:100%;height:auto\"></body></html>"}} {
 		part, e := alt.CreatePart(textproto.MIMEHeader{"Content-Type": {body.kind + "; charset=UTF-8"}, "Content-Transfer-Encoding": {"base64"}})
 		if e != nil {
 			return e
@@ -131,7 +131,7 @@ func writeImageMail(out io.Writer, j store.Job, from, to string, picture []byte)
 	if _, err = part.Write(alternative.Bytes()); err != nil {
 		return err
 	}
-	part, err = root.CreatePart(textproto.MIMEHeader{"Content-Type": {"image/png"}, "Content-Transfer-Encoding": {"base64"}, "Content-Disposition": {`inline; filename="week.png"`}, "Content-ID": {"<week-image>"}})
+	part, err = root.CreatePart(textproto.MIMEHeader{"Content-Type": {"image/png"}, "Content-Transfer-Encoding": {"base64"}, "Content-Disposition": {`inline; filename="calendar.png"`}, "Content-ID": {"<week-image>"}})
 	if err != nil {
 		return err
 	}

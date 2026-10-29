@@ -24,6 +24,7 @@ import (
 )
 
 const Width, Height = 1960, 1840
+const DayWidth, DayHeight = 960, 1600
 const MaxPNG = 4 << 20
 
 type Event struct {
@@ -36,6 +37,7 @@ type Options struct {
 	FontFile         string
 	FontIndex        int
 	Truncated        bool
+	Days             int // 0 or 7: rolling week; 1: the selected local date.
 }
 type Result struct {
 	PNG               []byte
@@ -80,6 +82,7 @@ type painter struct {
 	img                              *image.RGBA
 	small, body, medium, date, title font.Face
 	colors                           map[string]ink
+	daily                            bool
 }
 
 func (p *painter) color(key string) ink {
@@ -195,16 +198,23 @@ func (p *painter) eventCard(r image.Rectangle, s segment) {
 	if !s.event.End.Equal(s.event.Start) {
 		clock += "–" + s.event.End.Format("15:04")
 	}
+	if p.daily && s.event.Start.Format("2006-01-02") != s.event.End.Format("2006-01-02") {
+		clock = s.event.Start.Format("01/02 15:04") + "–" + s.event.End.Format("01/02 15:04")
+	}
 	x, y, w := r.Min.X+8, r.Min.Y, r.Dx()-14
+	baseline, lineHeight, compactHeight, wrapHeight := 20, 20, 46, 84
+	if p.daily {
+		baseline, lineHeight, compactHeight, wrapHeight = 26, 26, 62, 108
+	}
 	lines := 1
-	if r.Dy() >= 84 {
+	if r.Dy() >= wrapHeight {
 		lines = 2
 	}
 	titles := wrapTitle(title, p.body, w, lines)
 	for i, line := range titles {
-		p.text(clip, x, y+20+i*20, line, p.body, rgb(0x243348))
+		p.text(clip, x, y+baseline+i*lineHeight, line, p.body, rgb(0x243348))
 	}
-	if r.Dy() < 46 {
+	if r.Dy() < compactHeight {
 		return
 	}
 	// Keep titles visible in short, narrow overlap cards. Never show a clipped
@@ -212,7 +222,7 @@ func (p *painter) eventCard(r image.Rectangle, s segment) {
 	if font.MeasureString(p.small, clock).Ceil() > w {
 		clock = startClock
 	}
-	clockY := 19 + len(titles)*20
+	clockY := baseline - 1 + len(titles)*lineHeight
 	if font.MeasureString(p.small, clock).Ceil() <= w {
 		p.text(clip, x, y+clockY, clock, p.small, colors.accent)
 	}
@@ -240,7 +250,11 @@ func wrapTitle(text string, face font.Face, width, lines int) []string {
 }
 
 func (p *painter) timed(ctx context.Context, items []segment, colX, colW, top, bottom, first, last int) (int, error) {
-	cards, collapsed, err := layoutTimed(ctx, items, colX, colW, top, bottom, first, last)
+	minHeight := minTimedHeight
+	if p.daily {
+		minHeight = 64
+	}
+	cards, collapsed, err := layoutTimedHeight(ctx, items, colX, colW, top, bottom, first, last, minHeight)
 	if err != nil {
 		return 0, err
 	}
@@ -259,14 +273,33 @@ func (p *painter) timed(ctx context.Context, items []segment, colX, colW, top, b
 	return collapsed, nil
 }
 
-// Render uses one fixed RGBA canvas (~14 MiB), a ReaderAt-backed font, and a
+// Render uses one bounded RGBA canvas (week ~14 MiB, day ~6 MiB), a ReaderAt-backed font, and a
 // bounded PNG buffer. Callers serialize rendering rather than spawning workers.
 func Render(ctx context.Context, options Options, events []Event) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
-	if options.Start.IsZero() || len(events) > 2000 {
+	days := options.Days
+	if days == 0 {
+		days = 7
+	}
+	if options.Start.IsZero() || len(events) > 2000 || (days != 1 && days != 7) {
 		return Result{}, errors.New("invalid weekly render bounds")
+	}
+	width, height := Width, Height
+	start := time.Date(options.Start.Year(), options.Start.Month(), options.Start.Day(), 0, 0, 0, 0, options.Start.Location())
+	if days == 1 {
+		width, height = DayWidth, DayHeight
+		// Filter defensively so the day title, legend and event count cannot
+		// expose other dates even if a caller supplies a wider agenda.
+		until := start.AddDate(0, 0, 1)
+		visible := make([]Event, 0, len(events))
+		for _, e := range events {
+			if e.Start.Before(until) && (e.End.After(start) || (e.End.Equal(e.Start) && !e.Start.Before(start))) {
+				visible = append(visible, e)
+			}
+		}
+		events = visible
 	}
 	file, err := os.Open(options.FontFile)
 	if err != nil {
@@ -291,28 +324,37 @@ func Render(ctx context.Context, options Options, events []Event) (Result, error
 			_ = face.Close()
 		}
 	}()
-	for _, size := range []float64{14, 17, 20, 30, 40} {
+	sizes := []float64{14, 17, 20, 30, 40}
+	if days == 1 {
+		sizes = []float64{17, 22, 24, 34, 40}
+	}
+	for _, size := range sizes {
 		face, e := opentype.NewFace(f, &opentype.FaceOptions{Size: size, DPI: 72, Hinting: font.HintingFull})
 		if e != nil {
 			return Result{}, e
 		}
 		faces = append(faces, face)
 	}
-	p := painter{img: image.NewRGBA(image.Rect(0, 0, Width, Height)), small: faces[0], body: faces[1], medium: faces[2], date: faces[3], title: faces[4]}
+	p := painter{img: image.NewRGBA(image.Rect(0, 0, width, height)), small: faces[0], body: faces[1], medium: faces[2], date: faces[3], title: faces[4], daily: days == 1}
 	box(p.img, p.img.Bounds(), rgb(0xF5F6FA))
-	start := time.Date(options.Start.Year(), options.Start.Month(), options.Start.Day(), 0, 0, 0, 0, options.Start.Location())
-	end := start.AddDate(0, 0, 6)
+	end := start.AddDate(0, 0, days-1)
 	generated := options.Generated.In(start.Location())
 	todayIndex := -1
-	for d := 0; d < 7; d++ {
+	for d := 0; d < days; d++ {
 		if start.AddDate(0, 0, d).Format("2006-01-02") == generated.Format("2006-01-02") {
 			todayIndex = d
 		}
 	}
-	p.text(p.img, 48, 78, "未来七天", p.title, rgb(0x202B3D))
-	p.text(p.img, 50, 116, fmt.Sprintf("%s — %s  ·  %s", start.Format("2006.01.02"), end.Format("2006.01.02"), start.Location()), p.body, rgb(0x768195))
-	rounded(p.img, image.Rect(Width-380, 44, Width-48, 94), 24, rgb(0xE7EEFC))
-	p.text(p.img, Width-358, 77, fmt.Sprintf("%d 项日程  /  滚动周视图", len(events)), p.medium, rgb(0x3B6DB9))
+	title, view := "未来七天", "滚动周视图"
+	dateLine := fmt.Sprintf("%s — %s  ·  %s", start.Format("2006.01.02"), end.Format("2006.01.02"), start.Location())
+	if days == 1 {
+		title, view = "今日日程", "当日视图"
+		dateLine = fmt.Sprintf("%s  ·  %s", start.Format("2006.01.02"), start.Location())
+	}
+	p.text(p.img, 48, 78, title, p.title, rgb(0x202B3D))
+	p.text(p.img, 50, 116, dateLine, p.body, rgb(0x768195))
+	rounded(p.img, image.Rect(width-380, 44, width-48, 94), 24, rgb(0xE7EEFC))
+	p.text(p.img, width-358, 77, fmt.Sprintf("%d 项日程  /  %s", len(events), view), p.medium, rgb(0x3B6DB9))
 	type legend struct{ key, name string }
 	legends := []legend{}
 	seen := map[string]bool{}
@@ -347,22 +389,26 @@ func Render(ctx context.Context, options Options, events []Event) (Result, error
 		p.colors[l.key] = c
 		used[c] = true
 	}
+	legendLimit := min(7, (width-100)/260)
 	for i, l := range legends {
-		if i >= 7 {
+		if i >= legendLimit {
 			break
 		}
 		x := 50 + i*260
 		rounded(p.img, image.Rect(x, 143, x+10, 153), 5, p.color(l.key).accent)
 		p.text(p.img, x+20, 154, fit(l.name, p.body, 225), p.body, rgb(0x586579))
 	}
-	rounded(p.img, image.Rect(36, 182, Width-36, 1744), 20, rgb(0xE7EAF0))
-	rounded(p.img, image.Rect(36, 179, Width-36, 1740), 20, rgb(0xFFFFFF))
-	plotX, colW := 112, (Width-148)/7
-	all := make([][]segment, 7)
-	timed := make([][]segment, 7)
+	if len(legends) > legendLimit {
+		p.text(p.img, width-100, 154, fmt.Sprintf("+%d", len(legends)-legendLimit), p.small, rgb(0x586579))
+	}
+	rounded(p.img, image.Rect(36, 182, width-36, height-96), 20, rgb(0xE7EAF0))
+	rounded(p.img, image.Rect(36, 179, width-36, height-100), 20, rgb(0xFFFFFF))
+	plotX, colW := 112, (width-148)/days
+	all := make([][]segment, days)
+	timed := make([][]segment, days)
 	allRows, first, last := 1, 7, 22
 	dstShift := false
-	for d := 0; d < 7; d++ {
+	for d := 0; d < days; d++ {
 		day := start.AddDate(0, 0, d)
 		all[d] = segments(events, day, true)
 		timed[d] = segments(events, day, false)
@@ -380,10 +426,10 @@ func Render(ctx context.Context, options Options, events []Event) (Result, error
 	}
 	first = max(0, first)
 	last = min(24, last)
-	gridTop, gridBottom := 290+allRows*34+14, 1700
+	gridTop, gridBottom := 290+allRows*34+14, height-140
 	weekdays := []string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
 	collapsed := 0
-	for d := 0; d < 7; d++ {
+	for d := 0; d < days; d++ {
 		if err = ctx.Err(); err != nil {
 			return Result{}, err
 		}
@@ -396,7 +442,7 @@ func Render(ctx context.Context, options Options, events []Event) (Result, error
 		if d == todayIndex {
 			shade = rgb(0xF3F7FF)
 		}
-		box(p.img, image.Rect(x, 194, x+colW-1, 1728), shade)
+		box(p.img, image.Rect(x, 194, x+colW-1, height-112), shade)
 		name := weekdays[day.Weekday()]
 		if d == todayIndex {
 			name += " · 今天"
@@ -425,18 +471,18 @@ func Render(ctx context.Context, options Options, events []Event) (Result, error
 		}
 		box(p.img, image.Rect(x, 279, x+colW, 280), rgb(0xE9EDF4))
 		if d > 0 {
-			box(p.img, image.Rect(x, 194, x+1, 1728), rgb(0xE8ECF3))
+			box(p.img, image.Rect(x, 194, x+1, height-112), rgb(0xE8ECF3))
 		}
 	}
 	p.text(p.img, 48, 310, "全天", p.small, rgb(0x8390A3))
 	unit := float64(gridBottom-gridTop) / float64(last-first)
 	for hour := first; hour <= last; hour++ {
 		y := gridTop + int(float64(hour-first)*unit)
-		box(p.img, image.Rect(plotX, y, plotX+7*colW, y+1), rgb(0xE5EAF2))
+		box(p.img, image.Rect(plotX, y, plotX+days*colW, y+1), rgb(0xE5EAF2))
 		p.text(p.img, 48, y+5, fmt.Sprintf("%02d:00", hour), p.small, rgb(0x8994A5))
 		if hour < last {
 			half := y + int(unit/2)
-			box(p.img, image.Rect(plotX, half, plotX+7*colW, half+1), rgb(0xF0F3F8))
+			box(p.img, image.Rect(plotX, half, plotX+days*colW, half+1), rgb(0xF0F3F8))
 		}
 	}
 	// Draw the current-time marker beneath cards so it cannot strike through
@@ -447,7 +493,7 @@ func Render(ctx context.Context, options Options, events []Event) (Result, error
 		box(p.img, image.Rect(x, y, x+colW, y+2), rgb(0xEB6767))
 		rounded(p.img, image.Rect(x-4, y-3, x+4, y+5), 4, rgb(0xEB6767))
 	}
-	for d := 0; d < 7; d++ {
+	for d := 0; d < days; d++ {
 		n, e := p.timed(ctx, timed[d], plotX+d*colW, colW, gridTop, gridBottom, first, last)
 		if e != nil {
 			return Result{}, e
@@ -455,7 +501,7 @@ func Render(ctx context.Context, options Options, events []Event) (Result, error
 		collapsed += n
 	}
 	footer := fmt.Sprintf("生成于 %s  ·  同色代表同一日历  ·  时间按本地时区排列", generated.Format("01-02 15:04"))
-	p.text(p.img, 48, 1791, footer, p.body, rgb(0x7A879B))
+	p.text(p.img, 48, height-49, fit(footer, p.body, width-96), p.body, rgb(0x7A879B))
 	warnings := []string{}
 	if collapsed > 0 {
 		warnings = append(warnings, fmt.Sprintf("%d 个密集日程块以 +N 折叠，完整信息请用 /today、/next 或日历客户端查看", collapsed))
@@ -467,9 +513,13 @@ func Render(ctx context.Context, options Options, events []Event) (Result, error
 		warnings = append(warnings, "包含夏令时切换日，时段按当地钟表时间显示")
 	}
 	if len(events) == 0 {
-		warnings = append(warnings, "未来七天暂无日程，留一点时间给自己。")
+		empty := "未来七天暂无日程，留一点时间给自己。"
+		if days == 1 {
+			empty = "今天暂无日程，留一点时间给自己。"
+		}
+		warnings = append(warnings, empty)
 	}
-	p.text(p.img, 48, 1822, fit(strings.Join(warnings, "  ·  "), p.small, Width-96), p.small, rgb(0x8793A5))
+	p.text(p.img, 48, height-18, fit(strings.Join(warnings, "  ·  "), p.small, width-96), p.small, rgb(0x8793A5))
 	var data bytes.Buffer
 	encoder := png.Encoder{CompressionLevel: png.BestSpeed}
 	if err = encoder.Encode(limitWriter{writer: &data, limit: MaxPNG}, p.img); err != nil {

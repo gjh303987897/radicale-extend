@@ -55,7 +55,7 @@ func testBot(t *testing.T) (*Bot, *query, *sender) {
 	c.Telegram.CommandsEnabled = true
 	q, s := &query{}, &sender{}
 	now := time.Date(2026, 10, 28, 1, 0, 0, 0, time.UTC)
-	b := &Bot{Config: c, Store: db, Agenda: q, Sender: s, Now: func() time.Time { return now }, scope: "test-bot", username: "test_bot", HTTP: &http.Client{Timeout: time.Second}}
+	b := &Bot{Config: c, Store: db, Agenda: q, Sender: s, Now: func() time.Time { return now }, scope: "test-bot", username: "test_bot", botID: 456, HTTP: &http.Client{Timeout: time.Second}}
 	return b, q, s
 }
 func update(id int64, text, kind string, chat int64) Update {
@@ -191,7 +191,7 @@ func TestSetupMenuWebhookAndRedaction(t *testing.T) {
 			}
 			result = map[string]any{"url": url}
 		case strings.HasSuffix(r.URL.Path, "/getMe"):
-			result = map[string]any{"username": "test_bot"}
+			result = map[string]any{"id": 456, "username": "test_bot"}
 		case strings.HasSuffix(r.URL.Path, "/setMyCommands"):
 			var body struct {
 				Scope struct {
@@ -203,14 +203,14 @@ func TestSetupMenuWebhookAndRedaction(t *testing.T) {
 				}
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
-			if body.Scope.Type != "chat" || body.Scope.ChatID != 123 || len(body.Commands) != 9 {
+			if body.Scope.Type != "chat" || body.Scope.ChatID != 123 || len(body.Commands) != 10 {
 				t.Error("invalid menu scope", body)
 			}
 			names := map[string]bool{}
 			for _, command := range body.Commands {
 				names[command.Command] = true
 			}
-			if !names["event"] || !names["remind"] || !names["week"] || names["reminders"] {
+			if !names["event"] || !names["remind"] || !names["week"] || !names["day"] || names["reminders"] {
 				t.Error("menu must advertise canonical event/remind commands", names)
 			}
 			menu = true
@@ -265,7 +265,7 @@ func TestPollingCancellationAndRateLimit(t *testing.T) {
 		case strings.HasSuffix(r.URL.Path, "/getWebhookInfo"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": map[string]any{"url": ""}})
 		case strings.HasSuffix(r.URL.Path, "/getMe"):
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": map[string]any{"username": "test_bot"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": map[string]any{"id": 456, "username": "test_bot"}})
 		case strings.HasSuffix(r.URL.Path, "/setMyCommands"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": true})
 		case strings.HasSuffix(r.URL.Path, "/getUpdates"):

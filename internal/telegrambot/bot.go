@@ -36,6 +36,9 @@ type EventEditor interface {
 type WeekQueue interface {
 	QueueWeek(context.Context, string) (bool, error)
 }
+type DayQueue interface {
+	QueueDay(context.Context, string) (bool, error)
+}
 
 type Bot struct {
 	Config          *config.Config
@@ -43,10 +46,12 @@ type Bot struct {
 	Agenda          Agenda
 	Editor          EventEditor
 	Week            WeekQueue
+	Day             DayQueue
 	HTTP            *http.Client
 	Sender          notify.Sender
 	Now             func() time.Time
 	scope, username string
+	botID           int64
 }
 
 func New(s *service.Service) *Bot {
@@ -109,21 +114,24 @@ func (b *Bot) setup(ctx context.Context) error {
 		return errors.New("Telegram commands require long polling; an existing webhook is configured")
 	}
 	var me struct {
+		ID       int64  `json:"id"`
 		Username string `json:"username"`
 	}
 	if err = b.call(ctx, "getMe", map[string]any{}, &me); err != nil {
 		return err
 	}
-	if me.Username == "" {
-		return errors.New("Telegram bot username missing")
+	if me.Username == "" || me.ID <= 0 {
+		return errors.New("Telegram bot identity missing")
 	}
 	b.username = me.Username
+	b.botID = me.ID
 	return b.call(ctx, "setMyCommands", map[string]any{
 		"scope": map[string]any{"type": "chat", "chat_id": chat},
 		"commands": []map[string]string{
 			{"command": "today", "description": "列出今天的日程"},
-			{"command": "next", "description": "列出最近日程：/next [N]，默认 5 条，最多 20 条"},
-			{"command": "week", "description": "生成未来七天日历图片，发送至已启用的通知渠道"},
+			{"command": "next", "description": "最近日程：/next [1–20]，默认 5 条"},
+			{"command": "week", "description": "发送未来七天日程图"},
+			{"command": "day", "description": "发送今天的日程图"},
 			{"command": "event", "description": "查看事件及提醒规则：/event ID"},
 			{"command": "title", "description": "编辑选中事件标题：/title ID 新标题"},
 			{"command": "remind", "description": "修改提醒规则：/remind ID smtp|telegram|all 15m|off|default"},
@@ -134,23 +142,34 @@ func (b *Bot) setup(ctx context.Context) error {
 	}, nil)
 }
 
+type telegramUser struct {
+	ID    int64 `json:"id"`
+	IsBot bool  `json:"is_bot"`
+}
+type telegramChat struct {
+	ID   int64  `json:"id"`
+	Type string `json:"type"`
+}
+type telegramMessage struct {
+	ID   int64        `json:"message_id"`
+	Date int64        `json:"date"`
+	Text string       `json:"text"`
+	Chat telegramChat `json:"chat"`
+	From telegramUser `json:"from"`
+}
+type callbackQuery struct {
+	ID      string           `json:"id"`
+	From    telegramUser     `json:"from"`
+	Message *telegramMessage `json:"message"`
+	Data    string           `json:"data"`
+}
 type Update struct {
-	ID      int64 `json:"update_id"`
-	Message *struct {
-		Date int64  `json:"date"`
-		Text string `json:"text"`
-		Chat struct {
-			ID   int64  `json:"id"`
-			Type string `json:"type"`
-		} `json:"chat"`
-		From struct {
-			ID    int64 `json:"id"`
-			IsBot bool  `json:"is_bot"`
-		} `json:"from"`
-	} `json:"message"`
+	ID       int64            `json:"update_id"`
+	Message  *telegramMessage `json:"message"`
+	Callback *callbackQuery   `json:"callback_query"`
 }
 
-const help = "日程管理\n/today — 今天的日程（含全天、跨天和已结束日程）\n/next [N] — 从现在起最近 N 个日程，默认 5 条，N 为 1–20（含进行中日程，查询未来 366 天）\n/week — 手动发送今天起连续七天的日程图（已启用的 SMTP／Telegram 渠道）\n/event ID — 查看事件及提醒规则\n/title ID 新标题 — 编辑标题\n/remind ID smtp|telegram|all 15m|1h|off|default — 修改提醒规则：提前量、关闭或恢复继承\n重复日程默认仅修改选中的那一次；/title_series 和 /remind_series 修改整个系列（已有单次提醒覆盖仍优先）。\nID 来自日程列表，有效期 24 小时。标题最多 200 字。SMTP 等渠道仍需在服务端启用。\n/help — 使用说明\n按服务器配置的时区显示。"
+const help = "日程助手\n点下方按钮查看日程，点事件按钮查看详情。\n\n/today 今天（含全天、跨天及已结束）\n/next [N] 最近日程，默认 5 条，最多 20 条\n/day 今日日程图\n/week 七天日程图\n/event ID 事件与提醒\n/title ID 新标题\n/remind ID smtp|telegram|all 15m|off|default\n\n按钮默认仅改本次；整个系列用 /title_series、/remind_series。事件 ID 有效 24 小时；标题最多 200 字。"
 
 func (b *Bot) reply(ctx context.Context, u Update) []string {
 	m := u.Message
@@ -175,21 +194,27 @@ func (b *Bot) reply(ctx context.Context, u Update) []string {
 	if command == "/event" || command == "/title" || command == "/title_series" || command == "/remind" || command == "/remind_series" {
 		return b.editReply(ctx, command, fields[1:])
 	}
-	if command == "/week" {
+	if command == "/week" || command == "/day" {
 		if len(fields) != 1 {
-			return []string{"用法：/week（从今天起连续七天，发送至已启用的 SMTP／Telegram 渠道）"}
+			return []string{"用法：" + command + "，发送日程图。"}
 		}
-		if b.Week == nil {
-			return []string{"周视图图片服务暂不可用。"}
+		var queue func(context.Context, string) (bool, error)
+		if command == "/day" && b.Day != nil {
+			queue = b.Day.QueueDay
+		} else if command == "/week" && b.Week != nil {
+			queue = b.Week.QueueWeek
 		}
-		queued, err := b.Week.QueueWeek(ctx, service.Hash(b.scope, strconv.FormatInt(u.ID, 10)))
+		if queue == nil {
+			return []string{"日程图片服务暂不可用。"}
+		}
+		queued, err := queue(ctx, service.Hash(b.scope, strconv.FormatInt(u.ID, 10)))
 		if err != nil {
-			return []string{"未能加入图片发送队列。请确认通知渠道已启用，并至少间隔一分钟后重试；队列繁忙时请稍后再试。"}
+			return []string{"未能生成日程图：请确认渠道已启用，并间隔一分钟后重试。"}
 		}
 		if !queued {
 			return []string{"已收到这次图片请求，无需重复提交。"}
 		}
-		return []string{"已加入图片队列，将通过已启用的 SMTP／Telegram 渠道发送未来七天日程图；未启用的渠道不会发送。"}
+		return []string{"已加入图片队列，将发送至已启用的渠道。"}
 	}
 	limit := 5
 	if command == "/next" {
@@ -220,25 +245,27 @@ func (b *Bot) reply(ctx context.Context, u Update) []string {
 	}
 	now := b.Now().In(loc)
 	from, to := now, now.AddDate(0, 0, 366)
-	heading := fmt.Sprintf("最近 %d 个日程（含进行中，未来 366 天）", limit)
+	heading := fmt.Sprintf("最近 %d 个日程", limit)
+	today := false
 	if command == "/today" || command == "今日日程" || command == "今天的日程" {
 		from = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
 		to = from.AddDate(0, 0, 1)
 		limit = 101
-		heading = "今日日程 · " + from.Format("2006-01-02")
+		heading = "今天 · " + from.Format("01-02")
+		today = true
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	events, err := b.Agenda.Agenda(queryCtx, from, to, limit)
 	if err != nil {
-		return []string{"日程查询失败：日历服务暂不可用、日程数据不受支持或超出查询上限。请稍后重试。"}
+		return []string{"日程查询失败：服务不可用、数据不受支持或超出上限。请稍后重试。"}
 	}
 	if len(events) > limit {
 		events = events[:limit]
 	}
-	lines := []string{heading, "时区：" + b.Config.Timezone}
+	lines := []string{heading + " · " + b.Config.Timezone}
 	if len(events) == 0 {
-		lines = append(lines, "这个时间范围内没有日程。")
+		lines = append(lines, "没有日程。")
 	}
 	truncated := len(events) > 100
 	if truncated {
@@ -260,43 +287,60 @@ func (b *Bot) reply(ctx context.Context, u Update) []string {
 		}
 	}
 	for i, e := range events {
-		label := clean(e.Summary, 160)
+		label := clean(e.Summary, 80)
 		if label == "" {
 			label = "（无标题）"
 		}
 		if e.Hidden {
-			label = "（日程详情已隐藏）"
+			label = "私人日程"
 		}
-		start, end := e.Start.In(loc), e.End.In(loc)
-		when := start.Format("01-02 15:04")
-		if end.After(start) {
-			when += " → " + end.Format("01-02 15:04")
+		when := agendaTime(e, loc, today)
+		if !e.AllDay && !e.Start.After(now) && e.End.After(now) {
+			when += " · 进行中"
 		}
-		if e.AllDay {
-			when = start.Format("01-02") + " 全天"
-			if last := end.AddDate(0, 0, -1); last.Format("2006-01-02") != start.Format("2006-01-02") {
-				when = start.Format("01-02") + " → " + last.Format("01-02") + " 全天"
-			}
-		}
-		lines = append(lines, fmt.Sprintf("\n%d. %s\n%s", i+1, label, when))
+		block := fmt.Sprintf("\n%d. %s\n%s", i+1, label, when)
 		if ids[i] != "" {
-			scope := "事件"
-			if e.Instance != "" {
-				scope = "重复系列的本次实例"
-			}
-			lines = append(lines, "ID："+ids[i]+"（"+scope+"）")
+			// This internal marker is removed from list text and becomes a
+			// per-event button by interactiveReplies. Keep each entry together.
+			block += "\nID：" + ids[i]
 		}
 		if !e.Hidden && e.Location != "" {
-			lines = append(lines, "地点："+clean(e.Location, 120))
+			block += "\n📍 " + clean(e.Location, 60)
 		}
+		lines = append(lines, block)
 	}
 	if truncated {
 		lines = append(lines, "\n日程较多，仅展示最早的 100 个。")
 	}
-	if len(refs) > 0 {
-		lines = append(lines, "\n查看事件及提醒规则：/event ID\n改标题：/title ID 新标题\n修改提醒规则：/remind ID telegram 15m")
-	}
 	return pages(lines)
+}
+
+func agendaTime(e service.AgendaEvent, loc *time.Location, today bool) string {
+	start, end := e.Start.In(loc), e.End.In(loc)
+	if e.AllDay {
+		last := end.AddDate(0, 0, -1)
+		if end.After(start) && last.Format("2006-01-02") != start.Format("2006-01-02") {
+			return start.Format("01-02") + "–" + last.Format("01-02") + " 全天"
+		}
+		if today {
+			return "全天"
+		}
+		return start.Format("01-02") + " 全天"
+	}
+	format := "01-02 15:04"
+	if today {
+		format = "15:04"
+	}
+	when := start.Format(format)
+	if end.After(start) {
+		endFormat := "15:04"
+		if end.Format("2006-01-02") != start.Format("2006-01-02") {
+			endFormat = "01-02 15:04"
+			when = start.Format("01-02 15:04")
+		}
+		when += "–" + end.Format(endFormat)
+	}
+	return when
 }
 
 func clean(text string, limit int) string {
@@ -339,7 +383,7 @@ func (b *Bot) poll(ctx context.Context) error {
 		return err
 	}
 	var updates []Update
-	if err = b.call(ctx, "getUpdates", map[string]any{"offset": offset, "timeout": 20, "limit": 20, "allowed_updates": []string{"message"}}, &updates); err != nil {
+	if err = b.call(ctx, "getUpdates", map[string]any{"offset": offset, "timeout": 20, "limit": 20, "allowed_updates": []string{"message", "callback_query"}}, &updates); err != nil {
 		return err
 	}
 	sort.Slice(updates, func(i, j int) bool { return updates[i].ID < updates[j].ID })
@@ -347,8 +391,8 @@ func (b *Bot) poll(ctx context.Context) error {
 		if u.ID < offset {
 			continue
 		}
-		replies := b.reply(ctx, u)
-		if err = b.Store.SaveTelegramUpdate(ctx, b.scope, u.ID, replies, b.Now()); err != nil {
+		replies := b.respond(ctx, u)
+		if err = b.Store.SaveTelegramMessages(ctx, b.scope, u.ID, replies, b.Now()); err != nil {
 			return err
 		}
 		offset = u.ID + 1
@@ -365,7 +409,7 @@ func (b *Bot) flush(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		err = b.Sender.Send(ctx, store.Job{Channel: "telegram", Body: r.Body})
+		err = b.Sender.Send(ctx, store.Job{Channel: "telegram", Body: r.Body, TelegramReplyMarkup: r.ReplyMarkup})
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}

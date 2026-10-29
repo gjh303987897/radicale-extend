@@ -94,6 +94,7 @@ func run() error {
 	go func() { defer close(weekDone); weekly.Run(ctx) }()
 	bot := telegrambot.New(s)
 	bot.Week = weekly
+	bot.Day = weekly
 	go func() { defer close(botDone); bot.Run(ctx) }()
 	httpServer := &http.Server{Addr: c.Listen, Handler: mcpapi.HTTP(s, server), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	failure := make(chan error, 1)

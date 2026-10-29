@@ -57,7 +57,13 @@ func (c *Channels) sendTelegram(ctx context.Context, j store.Job) error {
 	if !c.Config.Telegram.Enabled {
 		return &Error{Permanent: true, Message: "Telegram disabled"}
 	}
-	text := j.Title + "\n" + j.Body
+	text := j.Body
+	if j.Title != "" {
+		text = j.Title
+		if j.Body != "" {
+			text += "\n" + j.Body
+		}
+	}
 	var out strings.Builder
 	units := 0
 	for _, r := range text {
@@ -69,7 +75,22 @@ func (c *Channels) sendTelegram(ctx context.Context, j store.Job) error {
 		units += n
 		out.WriteRune(r)
 	}
-	body, _ := json.Marshal(map[string]any{"chat_id": c.Config.Telegram.ChatID, "text": out.String()})
+	args := map[string]any{
+		"chat_id":              c.Config.Telegram.ChatID,
+		"text":                 out.String(),
+		"link_preview_options": map[string]bool{"is_disabled": true},
+	}
+	if j.TelegramReplyMarkup != "" {
+		var markup map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(j.TelegramReplyMarkup), &markup); err != nil || markup == nil {
+			return &Error{Permanent: true, Message: "invalid Telegram reply markup"}
+		}
+		args["reply_markup"] = markup
+	}
+	body, err := json.Marshal(args)
+	if err != nil {
+		return &Error{Permanent: true, Message: "Telegram request encoding failed"}
+	}
 	url := strings.TrimRight(c.Config.Telegram.APIURL, "/") + "/bot" + c.Config.Telegram.Token.Value + "/sendMessage"
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
